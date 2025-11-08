@@ -1,0 +1,139 @@
+Category,Subcategory,Line Item,TechRidge Qty,TechRidge Unit,TechRidge Unit Cost,TechRidge Total (Parking),Our Model Qty,Our Model Unit Cost,Our Model Total,Variance $,Variance %,Status,Notes/Action Needed
+FOUNDATION & BELOW-GRADE,Earthwork,Footings Excavation,3672,CY,$8.00,"$14,979",Included,Included,Included,N/A,N/A,✓,"Included in excavation"
+FOUNDATION & BELOW-GRADE,Earthwork,Backfill Foundation,1640,CY,$35.00,"$29,265",Included,Included,Included,N/A,N/A,✓,"Included in excavation"
+FOUNDATION & BELOW-GRADE,Earthwork,Backfill at Ramp,2397,CY,$35.00,"$42,787",Included,Included,Included,N/A,N/A,✓,"Included in excavation"
+FOUNDATION & BELOW-GRADE,Earthwork,Over Excavation Footings - 6' Deep,7805,CY,$36.79,In Sitework,Included,Included,Included,N/A,N/A,✓,"Verify in excavation calc"
+FOUNDATION & BELOW-GRADE,Earthwork,Over Excavation Slab - 6' Deep,3014,CY,$36.79,In Sitework,Included,Included,Included,N/A,N/A,✓,"Verify in excavation calc"
+FOUNDATION & BELOW-GRADE,Earthwork,Backfill at Over Excavation - Granular Borrow,4791,CY,$16.05,In Sitework,Included,Included,Included,N/A,N/A,✓,"Verify in excavation calc"
+FOUNDATION & BELOW-GRADE,Earthwork,Dispose of Excess Material - Offsite,2032,CY,$25.75,"$26,681",Included,Included,Included,N/A,N/A,✓,"Included in excavation"
+FOUNDATION & BELOW-GRADE,Foundation Utilities,Footing Drain,1285,LF,$15.00,"$9,829",0,,$0,"($9,829)",-100%,❌,MISSING - Add footing drain system
+FOUNDATION & BELOW-GRADE,Foundation Utilities,Building Footprint - Sub drain System,71952,SF,$0.50,"$18,346",0,,$0,"($18,346)",-100%,❌,MISSING - Add sub-drain system
+FOUNDATION & BELOW-GRADE,Footings - Continuous,FTS2.0,427,CY,$650.00,"$277,622",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Continuous,FC4.0,404,CY,$650.00,"$262,311",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Continuous,FC10.0,503,CY,$650.00,"$326,926",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Continuous,FC11.0,124,CY,$650.00,"$80,287",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Spot,FS10.0,177,CY,$650.00,"$114,753",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Spot,FS12.0,61,CY,$650.00,"$39,867",Included,Included,Included,N/A,N/A,✓,"Verify footing calc"
+FOUNDATION & BELOW-GRADE,Footings - Spot,Elevator,133,CY,$650.00,"$28,889",Included,Included,Included,N/A,N/A,✓,"Verify elevator footing"
+FOUNDATION & BELOW-GRADE,Foundation Walls,8B Elevator,660,SF,$25.00,"$5,500",Included,Included,Included,N/A,N/A,✓,"Verify continuous footing calc"
+FOUNDATION & BELOW-GRADE,Foundation Walls,CW-10A&B,3632,SF,$27.50,"$99,880",Included,Included,Included,N/A,N/A,✓,"Verify retaining wall calc"
+FOUNDATION & BELOW-GRADE,Foundation Walls,CW-12A (12" core walls),2030,SF,$28.50,"$57,855",Included,Included,Included,N/A,N/A,✓,"Verify retaining wall calc"
+FOUNDATION & BELOW-GRADE,Reinforcing Steel,Continuous Footings - 110 PCY,160286,LBS,$1.25,"$102,170",Included,Included,Included,N/A,N/A,✓,"Verify rebar calc"
+FOUNDATION & BELOW-GRADE,Reinforcing Steel,Spots - 65 PCY,24129,LBS,$1.25,"$30,161",Included,Included,Included,N/A,N/A,✓,"Verify rebar calc"
+FOUNDATION & BELOW-GRADE,Reinforcing Steel,Walls - 4.0 PSF,25288,LBS,$1.25,"$16,119",Included,Included,Included,N/A,N/A,✓,"Verify rebar calc"
+FOUNDATION & BELOW-GRADE,Concrete Misc,Elevator Sump Pits,3,EA,$675.00,"$675",0,,$0,"($675)",-100%,❌,MISSING - Add elevator sump pits
+FOUNDATION & BELOW-GRADE,Concrete Misc,Concrete Pumping,Included,CY,$20.00,$0,Included,Included,Included,N/A,N/A,✓,"Included in pumping calc"
+FOUNDATION & BELOW-GRADE,Concrete Misc,VDC Coordination - Trade Partner Budget,233,HRS,$94.50,"$11,204",0,,$0,"($11,204)",-100%,❌,MISSING - Add VDC coordination
+FOUNDATION & BELOW-GRADE,Waterproofing,Foundation Dampproofing - Fluid Applied,5140,SF,$3.00,"$15,420",0,,$0,"($15,420)",-100%,❌,MISSING - Add foundation dampproofing
+FOUNDATION & BELOW-GRADE,Waterproofing,Waterproofing Elevator Pits - Sheet Membrane,2077,SF,$11.00,"$9,614",0,,$0,"($9,614)",-100%,❌,MISSING - Add elevator pit waterproofing
+SUPERSTRUCTURE,Under Slab,Gravel 4",71952,SF,$0.85,"$25,140",Included,Included,Included,N/A,N/A,✓,"Verify gravel calc"
+SUPERSTRUCTURE,Under Slab,Vapor Barrier - Units Only,45492,SF,$0.65,"$29,570",0,,$0,"($29,570)",-100%,❌,Not applicable - parking only
+SUPERSTRUCTURE,Slab on Grade,SOG 4" - Units,45492,SF,$5.00,"$227,460",0,,$0,"($227,460)",-100%,❌,Not applicable - parking only
+SUPERSTRUCTURE,Slab on Grade,SOG 5" - Parking,26460,SF,$6.00,"$158,760",Included,Included,Included,N/A,N/A,✓,"Verify SOG calc"
+SUPERSTRUCTURE,Columns,CC18A 1'-6"x2'-0" Rectangular,196,CY,$950.00,"$186,200",Included,Included,Included,N/A,N/A,✓,"Verify column calc"
+SUPERSTRUCTURE,Elevated Slabs,Suspended Slab - 8" Parking 2 Way Slab,85792,SF,$18.00,"$1,489,960",Included,Included,Included,N/A,N/A,✓,"Already audited - known good"
+SUPERSTRUCTURE,Beams,Additional Beam Allowance,1,LS,$200000.00,"$200,000",0,,$0,"($200,000)",-100%,❌,MISSING - Add beam allowance
+SUPERSTRUCTURE,Walls,Partition Wall & Elevator Pits 8",660,SF,$25.00,"$5,500",Included,Included,Included,N/A,N/A,✓,"Included in continuous footing"
+SUPERSTRUCTURE,Walls,Parking Barrier Walls,840,SF,$27.50,"$23,100",Included,Included,Included,N/A,N/A,✓,"Verify barrier calc"
+SUPERSTRUCTURE,Walls,ShearWall 12" (3 hour fire wall),55440,SF,$28.50,"$1,632,558",Included,Included,Included,N/A,N/A,✓,"Already audited - known good"
+SUPERSTRUCTURE,Reinforcing Steel,Slab on Grade - 1.1 PSF,79147,SF,$1.25,"$40,668",Included,Included,Included,N/A,N/A,✓,"Verify SOG rebar"
+SUPERSTRUCTURE,Reinforcing Steel,Concrete Columns - 1320 PCY,258720,LBS,$1.25,"$323,400",Included,Included,Included,N/A,N/A,✓,"Verify column rebar"
+SUPERSTRUCTURE,Reinforcing Steel,8" PT Deck - 3.0 PSF,257376,LBS,$1.25,"$321,720",Included,Included,Included,N/A,N/A,✓,"Verify slab rebar"
+SUPERSTRUCTURE,Reinforcing Steel,Concrete Walls - 4.0 PSF,227760,LBS,$1.25,"$284,700",Included,Included,Included,N/A,N/A,✓,"Verify wall rebar"
+SUPERSTRUCTURE,Post-Tension,PT Cables 8" Slab - 1.25 PSF,171584,LBS,$1.10,"$188,742",Included,Included,Included,N/A,N/A,✓,"Verify PT calc - TR uses 2.0 lbs/SF rate"
+SUPERSTRUCTURE,Concrete Misc,Elevated Deck Stud Rails 12 EA per Column,1680,EA,$250.00,"$420,000",0,,$0,"($420,000)",-100%,❌,MISSING - Add stud rails
+SUPERSTRUCTURE,Concrete Misc,Metal Stair Pan Concrete Infill,8,FLT,$2000.00,"$10,667",Included,Included,Included,N/A,N/A,✓,"Verify stair calc"
+SUPERSTRUCTURE,Concrete Misc,Embeds and Anchor Bolts,85792,SF,$0.35,"$30,027",0,,$0,"($30,027)",-100%,❌,MISSING - Add embeds/anchor bolts
+SUPERSTRUCTURE,Concrete Misc,Concrete Pumping,3428,CY,$18.00,"$61,698",Included,Included,Included,N/A,N/A,✓,"Verify pumping calc"
+SUPERSTRUCTURE,Concrete Misc,VDC Coordination,135,HRS,$94.50,"$12,799",0,,$0,"($12,799)",-100%,❌,MISSING - Add VDC coordination
+SUPERSTRUCTURE,Masonry,MW-8A,3780,SF,$22.00,"$83,160",0,,$0,"($83,160)",-100%,❌,Check if masonry walls apply to parking
+SUPERSTRUCTURE,Masonry Reinforcing,Walls - Masonry - 2.5 PSF,9450,LBS,$1.35,"$12,758",0,,$0,"($12,758)",-100%,❌,Check if masonry walls apply to parking
+SUPERSTRUCTURE,Masonry Misc,VDC Coordination,80,HRS,$94.50,"$7,560",0,,$0,"($7,560)",-100%,❌,MISSING - Add VDC coordination
+SUPERSTRUCTURE,Wood Framing,Package - Lumber/Material/Labor/Equipment,223465,SF,$26.00,$0,0,,$0,$0,N/A,✓,Not applicable - concrete structure
+SUPERSTRUCTURE,Wood Framing,Temporary Trash Chutes,6,MO,$4000.00,$0,0,,$0,$0,N/A,✓,Not applicable - separate building
+SUPERSTRUCTURE,Wood Misc,VDC Coordination,68,HRS,$94.50,$0,0,,$0,$0,N/A,✓,Not applicable
+SUPERSTRUCTURE,Wood Misc,Attached Balconies,168,EA,$4500.00,$0,0,,$0,$0,N/A,✓,Not applicable - separate building
+SUPERSTRUCTURE,Gypcrete,Topping Slab - 1",177973,SF,$2.05,$0,0,,$0,$0,N/A,✓,Not applicable - separate building
+SUPERSTRUCTURE,Gypcrete,Acousti-Mat 1/4",135746,SF,$1.40,$0,0,,$0,$0,N/A,✓,Not applicable - separate building
+SUPERSTRUCTURE,Misc Steel,Misc. Metals - 0.35 lbs./sf - bldg,61.39,TN,$12500.00,"$266,892",0,,$0,"($266,892)",-100%,❌,MISSING - Add misc metals allowance
+SUPERSTRUCTURE,Misc Steel,Metal Stair Flights,22,FLT,$10400.00,"$152,533",Included,Included,Included,N/A,N/A,✓,"Verify stair calc"
+SUPERSTRUCTURE,Misc Steel,Metal Guardrails and Handrail at Stairs,22,FLT,$3150.00,"$46,200",0,,$0,"($46,200)",-100%,❌,MISSING - Add stair railings
+SUPERSTRUCTURE,Misc Steel,Ladders - Elevator Pit,3,EA,$750.00,"$1,500",0,,$0,"($1,500)",-100%,❌,MISSING - Add elevator pit ladders
+SUPERSTRUCTURE,Expansion Joint,Filler and Cover,678,LF,$360.00,"$244,080",0,,$0,"($244,080)",-100%,❌,MISSING - Add expansion joints
+EXTERIOR CLOSURE,Parking Screen,Parking Screen,10120,SF,$82.00,"$829,840",Included,Included,Included,N/A,N/A,✓,"Verify exterior calc"
+EXTERIOR CLOSURE,Doors,High Speed Overhead Parking Garage Entry,1,EA,$36000.00,"$36,000",0,,$0,"($36,000)",-100%,❌,MISSING - Add entry door
+EXTERIOR CLOSURE,Doors,Coiling Overhead Door at Trash Room,1,EA,$8750.00,"$8,750",0,,$0,"($8,750)",-100%,❌,Check if trash room in parking garage
+INTERIOR FINISHES,Common Area,Finishes Allowance,56535,SF,$65.00,$0,0,,$0,$0,N/A,✓,Not applicable - parking only
+INTERIOR FINISHES,Gypsum,Metal Stud and Gypsum Sheathing One Side and Furring,44000,SF,$6.00,"$66,000",0,,$0,"($66,000)",-100%,❌,MISSING - Check if applies to cores/walls
+INTERIOR FINISHES,Insulation,Sound & Thermal - Parking Ceiling,With Allowance,SF,$1.55,$0,0,,$0,$0,N/A,✓,Check if insulation needed
+INTERIOR FINISHES,Doors,Commercial Single with Frame/Door/Hardware,76,EA,$1850.00,"$28,120",0,,$0,"($28,120)",-100%,❌,MISSING - Add doors to stairs/elevators/utility
+INTERIOR FINISHES,Doors,Commercial Double with Frame/Door/Hardware,16,EA,$2350.00,"$7,520",0,,$0,"($7,520)",-100%,❌,MISSING - Add double doors
+INTERIOR FINISHES,Doors,Paint - Door Frames,285,EA,$125.00,"$35,625",0,,$0,"($35,625)",-100%,❌,MISSING - Add door frame painting
+INTERIOR FINISHES,Floor Finishes,Sealed Concrete Parking & Mechanical,127325,SF,$0.65,"$82,761",0,,$0,"($82,761)",-100%,❌,MISSING - Add sealed concrete finish
+INTERIOR FINISHES,Wall Finishes,Paint,With Allowance,SF,$0.78,"$52,900",0,,$0,"($52,900)",-100%,❌,MISSING - Add wall/ceiling painting
+INTERIOR FINISHES,Misc Common,Final Cleaning - Parking and Mechanical,127325,SF,$0.20,"$25,465",0,,$0,"($25,465)",-100%,❌,MISSING - Add final cleaning
+SPECIAL SYSTEMS,Fire Safety,Fire Extinguishers & Cab.,110,EA,$410.00,"$8,200",0,,$0,"($8,200)",-100%,❌,MISSING - Add fire extinguishers
+SPECIAL SYSTEMS,Amenities,Bicycle Racks,80,EA,$525.00,"$42,000",0,,$0,"($42,000)",-100%,❌,MISSING - Add bicycle racks
+SPECIAL SYSTEMS,Parking,Pavement Markings,319,STL,$55.00,"$17,545",0,,$0,"($17,545)",-100%,❌,MISSING - Add pavement markings
+SPECIAL SYSTEMS,Chutes,Trash Chute,5,FLR,$5000.00,"$17,362",0,,$0,"($17,362)",-100%,❌,Check if trash chute in parking garage
+SPECIAL SYSTEMS,Misc,Knox Box,2,EA,$900.00,"$1,800",0,,$0,"($1,800)",-100%,❌,MISSING - Add Knox box
+SPECIAL SYSTEMS,Misc,Roof Anchors,1595,LF,$40.00,"$63,800",0,,$0,"($63,800)",-100%,❌,Check if roof anchors needed (podium vs standalone)
+CONVEYING,Elevators,MRL Elevator - Passenger 1,6,STP,$32500.00,"$250,000",Included,Included,Included,N/A,N/A,✓,"Verify elevator calc"
+CONVEYING,Elevators,Elevator Cab Finish Allowance Upgrade,3,EA,$10000.00,"$10,000",0,,$0,"($10,000)",-100%,❌,MISSING - Add elevator cab upgrade
+CONVEYING,Elevators,Construction use Permit,3,EA,$2100.00,"$2,100",0,,$0,"($2,100)",-100%,❌,MISSING - Add elevator permit
+CONVEYING,Elevators,Warranty Extension,12,EA,$700.00,"$2,800",0,,$0,"($2,800)",-100%,❌,MISSING - Add elevator warranty
+CONVEYING,Elevators,Elevator Cab Protection,3,EA,$1600.00,"$1,600",0,,$0,"($1,600)",-100%,❌,MISSING - Add elevator cab protection
+CONVEYING,Elevators,Elevator Cab Refurbish/Repair,3,EA,$500.00,"$500",0,,$0,"($500)",-100%,❌,MISSING - Add elevator cab refurbish
+CONVEYING,Construction Equipment,Hoist Elevator - Crane Potain 389,26,MO,$8500.00,"$73,667",0,,$0,"($73,667)",-100%,❌,MISSING - Add construction hoist (GC item?)
+CONVEYING,Construction Equipment,Forklift,2,MO,$9526.00,"$6,351",0,,$0,"($6,351)",-100%,❌,MISSING - Add forklift (GC item?)
+MEP,Fire Protection,Total Building,7123,SF,$3.75,$0,0,,$0,$0,N/A,✓,Not applicable - parking only
+MEP,Fire Protection,Units,3839,SF,$4.15,$0,0,,$0,$0,N/A,✓,Not applicable
+MEP,Fire Protection,Corridors/Stairs/Offices,975,SF,$4.15,$0,0,,$0,$0,N/A,✓,Not applicable
+MEP,Fire Protection,Amenity & Lobby,216,SF,$4.15,$0,0,,$0,$0,N/A,✓,Not applicable
+MEP,Fire Protection,Parking Garage,1939,Incl SF,$3.00,"$381,975",Included,Included,Included,N/A,N/A,⚠️,"Verify MEP rate - TR uses $3/SF fire"
+MEP,Fire Protection,VDC Coordination,320,HRS,$95.00,"$30,400",0,,$0,"($30,400)",-100%,❌,MISSING - Add VDC coordination
+MEP,Plumbing,Parking Garage,969,Incl SF,$1.50,"$190,988",Included,Included,Included,N/A,N/A,⚠️,"Verify MEP rate - TR uses $1.50/SF plumbing"
+MEP,Plumbing,VDC Coordination,640,HRS,$95.00,"$60,800",0,,$0,"($60,800)",-100%,❌,MISSING - Add VDC coordination
+MEP,HVAC,Parking Garage,1454,Incl SF,$2.25,"$286,481",Included,Included,Included,N/A,N/A,⚠️,"Verify MEP rate - TR uses $2.25/SF HVAC"
+MEP,HVAC,VDC Coordination,640,HRS,$95.00,"$60,800",0,,$0,"($60,800)",-100%,❌,MISSING - Add VDC coordination
+ELECTRICAL,Building,Parking Garage,2101,Incl SF,$3.25,"$413,806",Included,Included,Included,N/A,N/A,⚠️,"Verify MEP rate - TR uses $3.25/SF electrical"
+ELECTRICAL,Specialty,Emergency Generator - Allowance,1,EA,$65000.00,$0,0,,$0,$0,N/A,✓,Check if generator needed for parking
+ELECTRICAL,Specialty,Electric Vehicle Chargers - 2 Charges,40,EA,$8500.00,"$340,000",0,,$0,"($340,000)",-100%,❌,MISSING - Add EV chargers (optional feature)
+ELECTRICAL,Misc,VDC Coordination,640,HRS,$95.00,"$60,800",0,,$0,"($60,800)",-100%,❌,MISSING - Add VDC coordination
+SITEWORK,Demolition,Trees/Utilities/Concrete/On-Site,140266,SF,$0.10,"$5,766",0,,$0,"($5,766)",-100%,❌,MISSING - Add site demolition/clearing
+SITEWORK,Earthwork,Under Building Mass Ex. Cut & Export 3.5 Foot,9327,CY,$8.00,"$30,672",Included,Included,Included,N/A,N/A,✓,"Verify excavation calc"
+SITEWORK,Earthwork,Cut & Export - At Pavement 4" for Gravel,305,CY,$38.00,"$4,761",0,,$0,"($4,761)",-100%,❌,MISSING - Add pavement prep
+SITEWORK,Earthwork,Import Gravel or Sidewalks/Flatwork,9100,SF,$1.40,"$5,237",0,,$0,"($5,237)",-100%,❌,MISSING - Add sidewalk gravel
+SITEWORK,Earthwork,Site Grading Prep,9100,SF,$0.50,"$1,870",0,,$0,"($1,870)",-100%,❌,MISSING - Add site grading
+SITEWORK,Earthwork,Import and Place Building Pads 1.5 FT,3346,CY,$35.00,"$48,132",Included,Included,Included,N/A,N/A,✓,"Verify structural fill calc"
+SITEWORK,Earthwork,Surveying,140266,SF,$0.23,"$13,261",0,,$0,"($13,261)",-100%,❌,MISSING - Add surveying
+SITEWORK,Earthwork,Over Excavation - 6' (Option 1),1,EA,$526894.00,"$216,586",Included,Included,Included,N/A,N/A,✓,"Verify over-excavation in calc"
+SITEWORK,Temporary,Temporary Fencing,1421,LF,$14.00,"$8,179",0,,$0,"($8,179)",-100%,❌,MISSING - Add temporary fencing
+SITEWORK,Erosion Control,Silt Fence,1421,LF,$4.50,"$2,629",0,,$0,"($2,629)",-100%,❌,MISSING - Add silt fence
+SITEWORK,Erosion Control,Inlet Protection - Budget Qnty,10,EA,$250.00,"$1,028",0,,$0,"($1,028)",-100%,❌,MISSING - Add inlet protection
+SITEWORK,Erosion Control,Gravel Entrance,2,EA,$2600.00,"$2,138",0,,$0,"($2,138)",-100%,❌,MISSING - Add gravel entrance
+SITEWORK,Erosion Control,Construction Maintenance,10,MO,$425.00,"$1,747",0,,$0,"($1,747)",-100%,❌,MISSING - Add erosion control maintenance
+SITEWORK,Erosion Control,Signage,1,LS,$455.00,$187,0,,$0,"($187)",-100%,❌,MISSING - Add erosion control signage
+SITEWORK,Erosion Control,Plan,1,LS,$1580.00,$649,0,,$0,"($649)",-100%,❌,MISSING - Add erosion control plan
+SITEWORK,Erosion Control,NOI & Termination Notice,1,LS,$350.00,$144,0,,$0,"($144)",-100%,❌,MISSING - Add NOI/termination
+SITEWORK,Utilities,Sewer - Oil/Water Separator,1,EA,$13500.00,"$13,500",0,,$0,"($13,500)",-100%,❌,MISSING - Add oil/water separator
+SITEWORK,Utilities,Sewer - 8" PVC,40,LF,$150.00,"$6,000",0,,$0,"($6,000)",-100%,❌,MISSING - Add sewer connection
+SITEWORK,Utilities,Storm Drain - 48" ADS,1,EA,$14500.00,"$5,960",0,,$0,"($5,960)",-100%,❌,MISSING - Add storm drain
+SITEWORK,Utilities,Storm Drain - 6x6 Junction Box,2,EA,$12500.00,"$10,277",0,,$0,"($10,277)",-100%,❌,MISSING - Add junction boxes
+SITEWORK,Utilities,Water line - 4" C900,60,LF,$150.00,$0,0,,$0,$0,N/A,✓,Check if water line to building
+SITEWORK,Utilities,Water Line - Irrigation - Service Lateral,1,LS,$2500.00,"$1,028",0,,$0,"($1,028)",-100%,❌,MISSING - Add irrigation connection
+SITEWORK,Utilities,Water Line - Fire Riser,1,LS,$12000.00,"$4,933",0,,$0,"($4,933)",-100%,❌,MISSING - Add fire riser
+SITEWORK,Utilities,Water Line - Fire Line - Lateral,60,LF,$150.00,"$3,700",0,,$0,"($3,700)",-100%,❌,MISSING - Add fire line lateral
+SITEWORK,Structures,Parking Canopies,12,EA,$1750.00,"$21,000",0,,$0,"($21,000)",-100%,❌,MISSING - Add parking canopies (optional)
+SITEWORK,On Grade,On Grade Allowance,68314,SF,$22.00,"$1,378,908",0,,$0,"($1,378,908)",-100%,❌,Not applicable - surface parking
+SITEWORK,Site Parking,Site Clearing,26800,SF,$0.10,$0,0,,$0,$0,N/A,✓,Not applicable - surface parking
+SITEWORK,Paving,Asphalt Paving - 3" over 6",24600,SF,$3.75,$0,0,,$0,$0,N/A,✓,Not applicable - surface parking
+SITEWORK,Concrete,Curb Approach,1004,SF,$12.00,$0,0,,$0,$0,N/A,✓,Check if curb work at entrance
+SITEWORK,Concrete,Curb and Gutter,1223,LF,$22.50,$0,0,,$0,$0,N/A,✓,Check if curb work at entrance
+SITEWORK,Concrete,Waterway,456,LF,$15.00,$0,0,,$0,$0,N/A,✓,Check if waterway needed
+SITEWORK,Concrete,Sidewalk,13370,SF,$4.75,$0,0,,$0,$0,N/A,✓,Check if sidewalks at entrance
+GENERAL CONDITIONS,,General Conditions,26,MO,$191008.00,"$958,008",Included,Included,"$871,325","($86,683)",-9.0%,⚠️,"Verify GC calculation - TR uses monthly method"
+SOFT COSTS,,General Liability Insurance (1.10%),1,LS,$699793.00,"$134,994",Included,Included,"$123,062","($11,932)",-8.8%,✓,"Close match"
+SOFT COSTS,,Contractor Fee (4.00%),1,LS,$2544703.00,"$490,888",Included,Included,"$446,481","($44,407)",-9.0%,✓,"Close match"
+SOFT COSTS,,CM/GC Contingency (2.25%),1,LS,$1431396.00,"$276,125",Included,Included,Included,N/A,N/A,✓,"Included in contingency"
+SOFT COSTS,,Design Completion Contingency (1.50%),1,LS,$954264.00,"$184,083",Included,Included,Included,N/A,N/A,✓,"Included in contingency"

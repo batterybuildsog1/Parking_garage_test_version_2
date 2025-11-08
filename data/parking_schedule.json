@@ -1,0 +1,106 @@
+{
+  "description": "Parking stall schedule from TechRidge design",
+  "levels": [
+    {
+      "level_name": "P0.5",
+      "elevation_ft": 0,
+      "accessible": 1,
+      "ev_ready": 0,
+      "standard": 25,
+      "van": 0,
+      "total": 26,
+      "level_type": "turn_zone"
+    },
+    {
+      "level_name": "P1",
+      "elevation_ft": 5,
+      "accessible": 1,
+      "ev_ready": 8,
+      "standard": 26,
+      "van": 0,
+      "total": 35,
+      "level_type": "straight_section"
+    },
+    {
+      "level_name": "P2",
+      "elevation_ft": 10,
+      "accessible": 1,
+      "ev_ready": 8,
+      "standard": 20,
+      "van": 0,
+      "total": 29,
+      "level_type": "straight_section"
+    },
+    {
+      "level_name": "P2.5",
+      "elevation_ft": 12.5,
+      "accessible": 0,
+      "ev_ready": 0,
+      "standard": 33,
+      "van": 0,
+      "total": 33,
+      "level_type": "turn_zone"
+    },
+    {
+      "level_name": "P3",
+      "elevation_ft": 15,
+      "accessible": 1,
+      "ev_ready": 8,
+      "standard": 26,
+      "van": 0,
+      "total": 35,
+      "level_type": "straight_section"
+    },
+    {
+      "level_name": "P3.5",
+      "elevation_ft": 17.5,
+      "accessible": 0,
+      "ev_ready": 0,
+      "standard": 33,
+      "van": 0,
+      "total": 33,
+      "level_type": "turn_zone"
+    },
+    {
+      "level_name": "P4",
+      "elevation_ft": 20,
+      "accessible": 1,
+      "ev_ready": 8,
+      "standard": 25,
+      "van": 0,
+      "total": 34,
+      "level_type": "straight_section"
+    },
+    {
+      "level_name": "P4.5",
+      "elevation_ft": 22.5,
+      "accessible": 0,
+      "ev_ready": 0,
+      "standard": 34,
+      "van": 0,
+      "total": 34,
+      "level_type": "turn_zone"
+    },
+    {
+      "level_name": "P5",
+      "elevation_ft": 25,
+      "accessible": 0,
+      "ev_ready": 0,
+      "standard": 25,
+      "van": 0,
+      "total": 25,
+      "level_type": "straight_section"
+    }
+  ],
+  "summary": {
+    "total_stalls": 284,
+    "total_accessible": 5,
+    "total_ev_ready": 32,
+    "total_standard": 247,
+    "total_van": 0,
+    "straight_section_levels": 5,
+    "turn_zone_levels": 4,
+    "avg_stalls_straight": 31.6,
+    "avg_stalls_turn": 31.5
+  }
+}

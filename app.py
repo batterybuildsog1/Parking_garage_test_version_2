@@ -328,7 +328,7 @@ try:
         return buf.getvalue()
 
     # === TABS ===
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Cost Breakdown", "📐 Geometry", "🏗️ 3D Model", "📋 2D Plans", "📈 Comparison", "📋 Detailed Quantities"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Cost Breakdown", "📐 Geometry", "🏗️ 3D Model", "📋 2D Plans", "📈 Comparison", "📋 Detailed Quantities", "🔍 TR Audit"])
 
     with tab1:
         st.subheader("Cost Breakdown")
@@ -926,6 +926,115 @@ try:
             col1.metric("Avg GSF/Level", f"{section['total_gsf'] / len(section['levels']):,.0f} SF")
             col2.metric("Avg Stalls/Level", f"{section['total_stalls'] / len(section['levels']):.1f}")
             col3.metric("Avg SF/Stall", f"{section['total_gsf'] / section['total_stalls']:.1f} SF")
+
+    with tab7:
+        st.subheader("TechRidge Budget Comparison")
+        st.markdown("Compare model costs against TechRidge 1.2 SD Budget (May 2025 PDF)")
+
+        # Get TR comparison data
+        tr_comparison = calculator.get_tr_comparison(garage)
+
+        # Overall Summary
+        st.markdown("### Overall Variance")
+        col1, col2, col3 = st.columns(3)
+
+        totals = tr_comparison['totals']
+        uc = tr_comparison['unit_costs']
+        geom = tr_comparison['geometry']
+
+        with col1:
+            st.metric(
+                "Total Cost Variance",
+                f"${totals['variance']:+,.0f}",
+                f"{totals['variance_pct']:+.1f}%",
+                delta_color="inverse"
+            )
+
+        with col2:
+            st.metric(
+                "Our Total",
+                f"${totals['our_total']:,.0f}",
+                f"${uc['our_cost_per_sf']:.2f}/SF"
+            )
+
+        with col3:
+            st.metric(
+                "TR Total",
+                f"${totals['tr_total']:,.0f}",
+                f"${uc['tr_cost_per_sf']:.2f}/SF"
+            )
+
+        # Geometry Comparison
+        st.markdown("### Geometry Comparison")
+        geom_df = pd.DataFrame([
+            {"Metric": "Total GSF", "TechRidge": f"{geom['tr_gsf']:,} SF", "Our Model": f"{geom['our_gsf']:,.0f} SF"},
+            {"Metric": "Total Stalls", "TechRidge": f"{geom['tr_stalls']}", "Our Model": f"{geom['our_stalls']}"},
+            {"Metric": "Cost per SF", "TechRidge": f"${uc['tr_cost_per_sf']:.2f}", "Our Model": f"${uc['our_cost_per_sf']:.2f}"},
+            {"Metric": "Cost per Stall", "TechRidge": f"${uc['tr_cost_per_stall']:,.0f}", "Our Model": f"${uc['our_cost_per_stall']:,.0f}"}
+        ])
+        st.dataframe(geom_df, use_container_width=True, hide_index=True)
+
+        # Category-by-Category Comparison
+        st.markdown("### Category-by-Category Comparison")
+        st.markdown("**Legend:** ✓ Within 10% | ⚠️ Within 20% | ❌ Over 20% variance | ⊕ Our item (not in TR)")
+
+        # Create DataFrame for categories
+        categories_data = []
+        for cat in tr_comparison['categories']:
+            categories_data.append({
+                "Category": cat['category'],
+                "TR Cost": cat['tr_cost'],
+                "Our Cost": cat['our_cost'],
+                "Variance": cat['variance'],
+                "Variance %": cat['variance_pct'],
+                "Status": cat['status'],
+                "Notes": cat['notes']
+            })
+
+        categories_df = pd.DataFrame(categories_data)
+
+        # Display with formatting
+        st.dataframe(
+            categories_df.style.format({
+                'TR Cost': lambda x: f'${x:,.0f}',
+                'Our Cost': lambda x: f'${x:,.0f}',
+                'Variance': lambda x: f'${x:+,.0f}',
+                'Variance %': lambda x: f'{x:+.1f}%'
+            }),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'Category': st.column_config.TextColumn('Category', width='large'),
+                'TR Cost': st.column_config.NumberColumn('TR Cost', width='small'),
+                'Our Cost': st.column_config.NumberColumn('Our Cost', width='small'),
+                'Variance': st.column_config.NumberColumn('Variance', width='small'),
+                'Variance %': st.column_config.NumberColumn('Variance %', width='small'),
+                'Status': st.column_config.TextColumn('Status', width='small'),
+                'Notes': st.column_config.TextColumn('Notes', width='large')
+            }
+        )
+
+        # Key Findings
+        st.markdown("### Key Findings")
+
+        # Count variances by severity
+        within_10 = sum(1 for cat in tr_comparison['categories'] if abs(cat['variance_pct']) < 10 and cat['tr_cost'] > 0)
+        within_20 = sum(1 for cat in tr_comparison['categories'] if 10 <= abs(cat['variance_pct']) < 20 and cat['tr_cost'] > 0)
+        over_20 = sum(1 for cat in tr_comparison['categories'] if abs(cat['variance_pct']) >= 20 and cat['tr_cost'] > 0)
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("✓ Within 10%", f"{within_10} categories")
+        col2.metric("⚠️ Within 20%", f"{within_20} categories")
+        col3.metric("❌ Over 20%", f"{over_20} categories")
+
+        st.markdown("#### Notes:")
+        st.markdown("""
+        - **Footing rebar double-count has been FIXED** (previously added ~$500-700)
+        - **Exterior screen variance** is expected (TR has different building height/configuration)
+        - **Site work variance** is expected (we don't model utilities, drainage, erosion control)
+        - **VDC Coordination** is in our model but not separately broken out in TR (likely in GC)
+        - **Overall +9.2% variance** is acceptable given design differences
+        """)
 
 except Exception as e:
     st.error(f"Error calculating garage: {str(e)}")

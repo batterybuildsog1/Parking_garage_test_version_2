@@ -428,16 +428,23 @@ class CostCalculator:
 
     def _calculate_rebar_by_component(self, garage: SplitLevelParkingGarage) -> float:
         """
-        Calculate rebar costs by component (footings, columns, slabs, walls)
+        Calculate rebar costs by component (columns, slabs)
+
+        IMPORTANT COST SEMANTICS:
+        - Footing rebar is NOT calculated here - it's handled in _calculate_foundation()
+          using discrete footing quantities from FootingCalculator
+        - Wall/core rebar is calculated in _calculate_core_walls()
+        - This method only calculates: Column rebar + PT slab rebar
 
         Uses component-specific quantities from budget
         """
         cost = 0
         cost_per_lb = self.component_costs['rebar_cost_per_lb']
 
-        # Footings rebar (lbs per CY of footing concrete)
-        footing_rebar_lbs = garage.concrete_foundation_cy * self.component_costs['rebar_footings_lbs_per_cy_concrete']
-        cost += footing_rebar_lbs * cost_per_lb
+        # FOOTING REBAR: Removed from here - already calculated in _calculate_foundation()
+        # using garage.spread_footing_rebar_lbs, garage.continuous_footing_rebar_lbs,
+        # and garage.retaining_wall_footing_rebar_lbs from FootingCalculator
+        # (Previous code incorrectly used garage.concrete_foundation_cy which is SOG, not footings)
 
         # Column rebar (lbs per CY of column concrete)
         column_rebar_lbs = garage.concrete_columns_cy * self.component_costs['rebar_columns_lbs_per_cy_concrete']
@@ -1622,6 +1629,171 @@ class CostCalculator:
         }
 
         return sections
+
+    def get_tr_comparison(self, garage: SplitLevelParkingGarage) -> Dict:
+        """
+        Generate TechRidge budget comparison report
+
+        Maps model costs to TR budget categories and shows ALL TR line items
+        (including placeholders for scope not yet modeled).
+
+        Returns dict with:
+        - tr_categories: List of TR line items with our mapped costs
+        - total_variance: Overall cost difference
+        - variance_pct: Overall percentage difference
+        - unit_cost_comparison: $/SF and $/stall metrics
+        """
+        costs = self.calculate_all_costs(garage)
+
+        # TechRidge parking budget from 1.2 SD Budget PDF (May 2025)
+        tr_budget = {
+            "Foundation & Below-Grade": {
+                "tr_cost": 965_907,
+                "our_components": ["foundation", "excavation"],
+                "notes": "Footings, SOG, excavation, retaining walls, waterproofing"
+            },
+            "Superstructure - Parking": {
+                "tr_cost": 6_044_740,
+                "our_components": [
+                    "structure_above", "structure_below", "concrete_pumping",
+                    "rebar", "post_tensioning", "core_walls", "stairs",
+                    "structural_accessories"
+                ],
+                "notes": "Slabs, columns, rebar, PT, walls, stairs, accessories"
+            },
+            "Exterior Closure": {
+                "tr_cost": 829_840,
+                "our_components": ["exterior"],
+                "notes": "Parking screen (brake metal panels)"
+            },
+            "Interior Finishes": {
+                "tr_cost": 313_766,
+                "our_components": ["interior_finishes"],
+                "notes": "Sealed concrete, painting, doors, cleaning"
+            },
+            "Special Systems": {
+                "tr_cost": 50_200,
+                "our_components": ["special_systems"],
+                "notes": "Fire extinguishers, pavement markings, knox box"
+            },
+            "Conveying Systems": {
+                "tr_cost": 347_017,
+                "our_components": ["elevators"],
+                "notes": "Elevators with accessories, permits, warranties"
+            },
+            "Mechanical (Fire/Plumbing/HVAC)": {
+                "tr_cost": 859_444,
+                "our_components": ["mep"],  # Partial - 70% of our MEP
+                "our_cost_multiplier": 0.70,  # MEP is split between Mechanical and Electrical
+                "notes": "Fire protection, plumbing, HVAC ventilation"
+            },
+            "Electrical (Lighting/Power)": {
+                "tr_cost": 413_806,
+                "our_components": ["mep"],  # Partial - 30% of our MEP
+                "our_cost_multiplier": 0.30,
+                "notes": "Electrical service, distribution, lighting, EV rough-in"
+            },
+            "Site Work": {
+                "tr_cost": 403_382,
+                "our_components": ["site_finishes"],
+                "notes": "Sealed concrete, striping, cleaning (utilities NOT modeled)"
+            },
+            "General Conditions": {
+                "tr_cost": 958_008,
+                "our_components": ["general_conditions"],
+                "notes": "9.37% of hard costs (or monthly rate method)"
+            },
+            "CM Fee": {
+                "tr_cost": 490_888,
+                "our_components": ["cm_fee"],
+                "notes": "4.39% of (hard + GC)"
+            },
+            "Insurance": {
+                "tr_cost": 134_994,
+                "our_components": ["insurance"],
+                "notes": "1.21% of (hard + GC)"
+            },
+            "Contingency": {
+                "tr_cost": 460_208,
+                "our_components": ["contingency"],
+                "notes": "4.12% of (hard + GC) - combined CM + design contingency"
+            },
+            "VDC Coordination": {
+                "tr_cost": 0,  # Not broken out separately in TR (likely in GC)
+                "our_components": ["vdc_coordination"],
+                "notes": "BIM coordination - NOT separately shown in TR budget"
+            }
+        }
+
+        tr_total = 12_272_200  # Total parking portion from TR budget
+
+        # Build comparison categories
+        comparison_categories = []
+
+        for category_name, category_data in tr_budget.items():
+            # Calculate our cost for this TR category
+            our_cost = 0
+            multiplier = category_data.get("our_cost_multiplier", 1.0)
+
+            for component in category_data["our_components"]:
+                if component in costs:
+                    our_cost += costs[component] * multiplier
+
+            tr_cost = category_data["tr_cost"]
+            variance = our_cost - tr_cost
+            variance_pct = (variance / tr_cost * 100) if tr_cost > 0 else 0
+
+            # Determine status icon
+            if tr_cost == 0:
+                status = "⊕"  # Our item, not in TR
+            elif abs(variance_pct) < 10:
+                status = "✓"  # Within 10%
+            elif abs(variance_pct) < 20:
+                status = "⚠️"  # Within 20%
+            else:
+                status = "❌"  # Over 20% variance
+
+            comparison_categories.append({
+                "category": category_name,
+                "tr_cost": tr_cost,
+                "our_cost": our_cost,
+                "variance": variance,
+                "variance_pct": variance_pct,
+                "status": status,
+                "notes": category_data["notes"]
+            })
+
+        # Calculate total variance
+        total_variance = costs['total'] - tr_total
+        total_variance_pct = (total_variance / tr_total * 100)
+
+        # Unit cost comparison
+        tr_sf = 127_325  # TR total GSF
+        tr_stalls = 319  # TR total stalls
+        tr_cost_per_sf = tr_total / tr_sf
+        tr_cost_per_stall = tr_total / tr_stalls
+
+        return {
+            "categories": comparison_categories,
+            "totals": {
+                "tr_total": tr_total,
+                "our_total": costs['total'],
+                "variance": total_variance,
+                "variance_pct": total_variance_pct
+            },
+            "unit_costs": {
+                "tr_cost_per_sf": tr_cost_per_sf,
+                "our_cost_per_sf": costs['cost_per_sf'],
+                "tr_cost_per_stall": tr_cost_per_stall,
+                "our_cost_per_stall": costs['cost_per_stall']
+            },
+            "geometry": {
+                "tr_gsf": tr_sf,
+                "our_gsf": garage.total_gsf,
+                "tr_stalls": tr_stalls,
+                "our_stalls": garage.total_stalls
+            }
+        }
 
 
 def load_cost_database() -> Dict:

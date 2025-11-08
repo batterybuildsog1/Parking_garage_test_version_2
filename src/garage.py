@@ -714,8 +714,14 @@ class SplitLevelParkingGarage:
 
         # === SLABS ===
         # Foundation slab on grade (5" thick)
+        # CRITICAL: concrete_foundation_cy is ONLY the SOG (slab on grade), NOT footings!
+        # Footings are calculated separately by FootingCalculator and stored in:
+        #   - self.spread_footing_concrete_cy (under columns)
+        #   - self.continuous_footing_concrete_cy (under core walls)
+        #   - self.retaining_wall_footing_concrete_cy (perimeter, if below-grade)
+        # This property should NEVER be used for footing rebar calculations.
         self.foundation_slab_sf = self.footprint_sf
-        self.concrete_foundation_cy = (self.foundation_slab_sf * (5/12)) / 27
+        self.concrete_foundation_cy = (self.foundation_slab_sf * (5/12)) / 27  # SOG ONLY
 
         # Suspended PT slabs (8" thick)
         # Use discrete sum from actual level areas (not footprint × levels)
@@ -1195,6 +1201,9 @@ class SplitLevelParkingGarage:
         self.spread_footing_count = spread['total_count']
         self.spread_footing_count_by_type = spread['count_by_type']
         self.spread_footing_concrete_cy = spread['total_concrete_cy']
+        # COST FLOW: spread_footing_rebar_lbs → cost_engine._calculate_foundation()
+        # Calculated by FootingCalculator using ACI 318-19 flexure/shear design
+        # Rate: 65 lbs/CY per TechRidge budget (different from continuous footings)
         self.spread_footing_rebar_lbs = spread['total_rebar_lbs']
         self.spread_footing_excavation_cy = spread['total_excavation_cy']
         self.spread_footings_by_type = spread['footings_by_type']
@@ -1203,6 +1212,9 @@ class SplitLevelParkingGarage:
         continuous = results['continuous_footings']
         self.continuous_footing_length_ft = continuous['total_length_ft']
         self.continuous_footing_concrete_cy = continuous['total_concrete_cy']
+        # COST FLOW: continuous_footing_rebar_lbs → cost_engine._calculate_foundation()
+        # Calculated by FootingCalculator using ACI 318-19 design for wall loads
+        # Rate: 110 lbs/CY per TechRidge budget (higher than spread due to wall loads)
         self.continuous_footing_rebar_lbs = continuous['total_rebar_lbs']
         self.continuous_footing_excavation_cy = continuous['total_excavation_cy']
         self.continuous_footings = continuous['footings']
@@ -1211,6 +1223,10 @@ class SplitLevelParkingGarage:
         retaining = results['retaining_wall_footings']
         self.has_retaining_wall_footings = retaining['has_retaining_walls']
         self.retaining_wall_footing_concrete_cy = retaining['total_concrete_cy']
+        # COST FLOW: retaining_wall_footing_rebar_lbs → cost_engine._calculate_foundation()
+        # Calculated by FootingCalculator for cantilever retaining wall footings
+        # Rate: 110 lbs/CY (same as continuous footings)
+        # Only present if below-grade levels exist
         self.retaining_wall_footing_rebar_lbs = retaining['total_rebar_lbs']
         self.retaining_wall_footing_excavation_cy = retaining['total_excavation_cy']
 

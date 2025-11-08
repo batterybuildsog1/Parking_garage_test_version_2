@@ -13,6 +13,70 @@ All costs calculated using discrete quantity takeoffs - no formula-based extrapo
 
 IMPORTANT: Uses discrete level GSF sum (garage.total_gsf), not footprint × levels
 See DISCRETE_LEVELS_GUIDE.md for floor area calculation methodology.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UNIT COST SEMANTICS - CRITICAL REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All unit costs from cost_database.json follow strict inclusion/exclusion rules.
+**READ THIS BEFORE MODIFYING ANY COST CALCULATIONS** to prevent double-counting.
+
+STRUCTURE UNIT COSTS (concrete + formwork + placement ONLY):
+
+  • suspended_slab_8in_sf ($18.00/SF)
+    INCLUDES: Concrete, formwork, placement
+    EXCLUDES: Rebar (→ _calculate_rebar_by_component)
+              Post-tensioning cables (→ _calculate_post_tensioning)
+              Pumping (→ _calculate_concrete_pumping)
+
+  • columns_18x24_cy ($950.00/CY)
+    INCLUDES: Concrete, formwork, placement
+    EXCLUDES: Rebar (→ _calculate_rebar_by_component at 1320 lbs/CY)
+              Column accessories/stud rails (→ _calculate_structural_accessories)
+
+  • slab_on_grade_5in_sf ($6.00/SF)
+    INCLUDES: Concrete, placement
+    EXCLUDES: Under-slab gravel (→ _calculate_foundation)
+              Vapor barrier (→ _calculate_foundation)
+              Rebar (→ _calculate_foundation for SOG, none currently modeled)
+
+FOUNDATION UNIT COSTS (concrete + formwork + placement ONLY):
+
+  • footings_spot_cy ($650.00/CY)
+    INCLUDES: Concrete, formwork, placement
+    EXCLUDES: Rebar (→ _calculate_foundation at 110 lbs/CY per TechRidge)
+              Excavation (→ _calculate_foundation, separate line item)
+
+  • footings_continuous_cy ($650.00/CY)
+    INCLUDES: Concrete, formwork, placement
+    EXCLUDES: Rebar (→ _calculate_foundation at 110 lbs/CY per TechRidge)
+              Excavation (→ _calculate_foundation, separate line item)
+
+WALL/CORE UNIT COSTS (concrete + formwork ONLY):
+
+  • core_wall_12in_cost_per_sf ($28.50/SF)
+    INCLUDES: Concrete, formwork (both faces), placement
+    EXCLUDES: Rebar (→ _calculate_core_walls at 3.0-4.0 lbs/SF for walls)
+
+REBAR UNIT COSTS (material + labor):
+
+  • rebar_cost_per_lb ($1.25/LB)
+    All-in rate for rebar: material, cutting, bending, placement, ties, chairs
+
+POST-TENSIONING UNIT COSTS (material + labor):
+
+  • post_tension_cable_cost_per_lb ($1.10/LB)
+    All-in rate for PT: cables, anchors, stressing, grouting
+
+SEMANTIC MODEL SUMMARY:
+  ✓ Concrete rates = concrete + formwork + placement ONLY
+  ✓ Rebar ALWAYS calculated separately (never embedded in concrete rates)
+  ✓ PT cables ALWAYS calculated separately (never embedded in slab rates)
+  ✓ Pumping ALWAYS calculated separately (never embedded in concrete rates)
+  ✓ Each material appears in EXACTLY ONE cost calculation method
+
+This prevents ALL double-counting of materials/labor.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import json
@@ -39,27 +103,9 @@ class CostCalculator:
     def __init__(self, cost_database: Dict):
         """Initialize with cost database"""
         self.costs = cost_database['unit_costs']
-        self.derived = cost_database['derived_unit_costs']
         self.component_costs = cost_database['component_specific_costs']
         self.soft_costs_pct = cost_database['soft_costs_percentages']
 
-    def _get_wall_12in_cost_per_cy(self) -> float:
-        """
-        Calculate cost per CY for 12" concrete walls
-
-        TEMPORARY PLACEHOLDER - TODO: Extract actual cost from TechRidge 1.2 SD Budget 2025-5-8.pdf
-
-        Calculation: Formed structural concrete walls
-        - We have $/SF cost: $28.50/SF from component_costs['core_wall_12in_cost_per_sf']
-        - Convert to $/CY: For 12" (1 ft) thick wall, 1 SF = 1/27 CY
-        - Therefore: $28.50/SF ÷ (1/27 CY/SF) = $769.50/CY
-
-        But this is ALL-IN (concrete + forming + rebar), not just concrete
-        For barriers/walls where we calculate rebar separately, use concrete + forming only
-        """
-        # Use about 60% of all-in cost (concrete + forming, excluding rebar calculated separately)
-        core_wall_sf = self.component_costs['core_wall_12in_cost_per_sf']
-        return (core_wall_sf / (1/27)) * 0.6  # ~$460/CY - placeholder
 
     def calculate_all_costs(self, garage: SplitLevelParkingGarage, gc_params: dict = None) -> Dict:
         """
@@ -83,7 +129,8 @@ class CostCalculator:
         # === ONE-TIME COSTS ===
         costs['foundation'] = self._calculate_foundation(garage)
         costs['excavation'] = self._calculate_excavation(garage)
-        costs['ramp_system'] = self.derived['ramp_system_fixed_cost']
+        # Ramp costs calculated from discrete components (walls, barriers, curbs)
+        costs['ramp_system'] = 0
 
         # === STRUCTURE COSTS ===
         costs['structure_above'] = self._calculate_structure_above(garage)
@@ -161,13 +208,24 @@ class CostCalculator:
         """
         Calculate foundation costs using discrete components
 
-        DISCRETE COMPONENTS:
-        - Slab on grade (5" thick concrete)
-        - Under-slab vapor barrier
-        - Under-slab gravel
-        - Footings (continuous and spot)
-        - Grade beams
-        - Rebar for foundation (separate line item)
+        COMPONENTS CALCULATED HERE:
+        • Slab on grade (5" thick concrete) - footprint area
+        • Under-slab vapor barrier
+        • Under-slab gravel (4" compacted)
+        • Subdrain system (drainage mat under entire slab)
+        • Footing drain (perimeter, if below-grade levels exist)
+        • Spread footings (concrete + rebar + excavation) - from FootingCalculator
+        • Continuous footings (concrete + rebar + excavation) - from FootingCalculator
+        • Retaining wall footings (concrete + rebar + excavation) - from FootingCalculator
+
+        CRITICAL: ALL footing rebar is calculated in THIS method using discrete quantities
+        from FootingCalculator. Do NOT calculate footing rebar in _calculate_rebar_by_component()
+        to avoid double-counting.
+
+        CALCULATED ELSEWHERE (not here):
+        • Suspended slab rebar → _calculate_rebar_by_component()
+        • Column rebar → _calculate_rebar_by_component()
+        • Wall rebar → _calculate_core_walls()
         """
         cost = 0
 
@@ -272,61 +330,56 @@ class CostCalculator:
 
     def _calculate_structure_above(self, garage: SplitLevelParkingGarage) -> float:
         """
-        Calculate structure costs for above-grade levels using discrete components
+        Calculate ALL structure costs (both above and below grade) using discrete components
 
-        DISCRETE COMPONENTS (calculated separately - NOT included here):
-        - Rebar (see _calculate_rebar)
-        - Post-tension cables (see _calculate_post_tensioning)
-        - Core walls (see _calculate_core_walls)
-        - Concrete pumping (see _calculate_concrete_pumping)
+        ARCHITECTURAL FACT: Below-grade levels have the SAME geometry as above-grade:
+        • Split-level system: Half-levels with ~50% footprint (helical ramp geometry continues)
+        • Single-ramp system: Full floors at 100% footprint (ramp continues)
+
+        The geometry module's DiscreteLevelCalculator already calculates total quantities
+        for ALL levels (above + below grade) with correct geometry.
 
         THIS METHOD CALCULATES:
-        - Suspended PT slabs (concrete + formwork + placement)
-        - Columns (concrete + formwork + placement)
+        • Suspended PT slabs: Concrete + formwork + placement ($18/SF for ALL levels)
+          Uses garage.suspended_levels_sf (includes both above and below grade)
+        • Columns: Concrete + formwork + placement ($950/CY for ALL levels)
+          Uses garage.concrete_columns_cy (includes both above and below grade)
+
+        IMPORTANT: Unit costs are for concrete + formwork + placement ONLY.
+        Other components calculated separately (to avoid double-counting):
+        • Rebar → _calculate_rebar_by_component()
+        • Post-tension cables → _calculate_post_tensioning()
+        • Core walls (12" concrete) → _calculate_core_walls()
+        • Concrete pumping → _calculate_concrete_pumping()
+
+        ADDITIONAL BELOW-GRADE COSTS (calculated elsewhere):
+        • Retaining walls → _calculate_excavation()
+        • Waterproofing → _calculate_excavation()
+        • Excavation/fill → _calculate_excavation()
         """
-        if garage.half_levels_above == 0:
-            return 0
+        # Suspended PT slabs (8" thick) - ALL levels
+        # garage.suspended_levels_sf already includes correct geometry for all levels
+        slab_cost_per_sf = self.costs['structure']['suspended_slab_8in_sf']  # $18/SF
+        total_slab_cost = garage.suspended_levels_sf * slab_cost_per_sf
 
-        cost = 0
+        # Columns (18" × 24" @ 31' grid) - ALL levels
+        # garage.concrete_columns_cy already includes columns for all levels
+        column_cost_per_cy = self.costs['structure']['columns_18x24_cy']  # $950/CY
+        total_column_cost = garage.concrete_columns_cy * column_cost_per_cy
 
-        # Suspended PT slabs (8" thick)
-        # Use discrete sum of suspended level areas (already calculated in geometry)
-        suspended_slab_sf = garage.suspended_levels_sf
-        slab_cost_per_sf = self.costs['structure']['suspended_slab_8in_sf']
-        cost += suspended_slab_sf * slab_cost_per_sf
-
-        # Columns (18" × 24" @ 31' grid)
-        # Geometry provides column concrete in CY
-        column_concrete_cy = garage.concrete_columns_cy
-        column_cost_per_cy = self.costs['structure']['columns_18x24_cy']
-        cost += column_concrete_cy * column_cost_per_cy
-
-        return cost
+        return total_slab_cost + total_column_cost
 
     def _calculate_structure_below(self, garage: SplitLevelParkingGarage) -> float:
         """
-        Calculate structure costs for below-grade levels (with premiums)
+        DEPRECATED: Below-grade structure now calculated in _calculate_structure_above()
 
-        Below-grade multipliers:
-        - First level (P0.5): 1.83× above-grade cost
-        - Subsequent levels: 1.27× above-grade cost
+        Since we use the same rates ($18/SF slabs, $950/CY columns) for both above
+        and below grade, and the geometry properties already include all levels,
+        there's no reason to split this calculation.
+
+        Returns 0 to maintain interface compatibility.
         """
-        if garage.half_levels_below == 0:
-            return 0
-
-        cost = 0
-        base_cost_per_sf = self.derived['structure_above_per_sf_floor']
-
-        # First 2 half-levels below-grade (e.g., B-0.5, B-1)
-        cost += garage.footprint_sf * base_cost_per_sf * self.derived['structure_below_multiplier_first']
-
-        # Additional below-grade half-levels beyond first 2 (if any)
-        if garage.half_levels_below > 2:
-            additional_half_levels = garage.half_levels_below - 2
-            cost += (garage.footprint_sf * additional_half_levels *
-                    base_cost_per_sf * self.derived['structure_below_multiplier_subsequent'])
-
-        return cost
+        return 0
 
     def _calculate_mep(self, garage: SplitLevelParkingGarage) -> float:
         """
@@ -441,10 +494,12 @@ class CostCalculator:
         cost = 0
         cost_per_lb = self.component_costs['rebar_cost_per_lb']
 
-        # FOOTING REBAR: Removed from here - already calculated in _calculate_foundation()
-        # using garage.spread_footing_rebar_lbs, garage.continuous_footing_rebar_lbs,
-        # and garage.retaining_wall_footing_rebar_lbs from FootingCalculator
-        # (Previous code incorrectly used garage.concrete_foundation_cy which is SOG, not footings)
+        # FOOTING REBAR: NOT calculated here to prevent double-counting
+        # Footing rebar is calculated in _calculate_foundation() using discrete quantities:
+        #   - garage.spread_footing_rebar_lbs (from FootingCalculator)
+        #   - garage.continuous_footing_rebar_lbs (from FootingCalculator)
+        #   - garage.retaining_wall_footing_rebar_lbs (from FootingCalculator)
+        # DO NOT add footing calculations here.
 
         # Column rebar (lbs per CY of column concrete)
         column_rebar_lbs = garage.concrete_columns_cy * self.component_costs['rebar_columns_lbs_per_cy_concrete']
@@ -1430,9 +1485,11 @@ class CostCalculator:
             barrier_height = wall_lf['ramp_barriers']['height_in']
 
             # Calculate barrier cost (concrete + rebar)
-            barrier_cy = garage.ramp_barrier_concrete_cy
+            # NOTE: barrier_sf already accounts for both faces (geometry module multiplies by 2)
+            # Cost at $28.50/SF applies to both-faces-already-counted SF
+            wall_cost_per_sf = self.component_costs['core_wall_12in_cost_per_sf']  # $28.50/SF
             barrier_rebar_lbs = garage.ramp_barrier_rebar_lbs
-            barrier_concrete_cost = barrier_cy * self._get_wall_12in_cost_per_cy()  # Placeholder - TODO: Extract from PDF
+            barrier_concrete_cost = barrier_sf * wall_cost_per_sf
             barrier_rebar_cost = barrier_rebar_lbs * rebar_cost
             barrier_total = barrier_concrete_cost + barrier_rebar_cost
             barrier_cost_sf = barrier_total / barrier_sf if barrier_sf > 0 else 0

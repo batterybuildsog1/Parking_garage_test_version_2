@@ -111,15 +111,6 @@
     "conveying_parking": 347017,
     "general_conditions_parking": 958008
   },
-  "derived_unit_costs": {
-    "foundation_per_sf_footprint": 36.50,
-    "structure_above_per_sf_floor": 26.00,
-    "structure_below_multiplier_first": 1.83,
-    "structure_below_multiplier_subsequent": 1.27,
-    "mep_per_sf_parking": 7.00,
-    "exterior_per_lf_perimeter_per_ft_height": 12.00,
-    "ramp_system_fixed_cost": 0
-  },
   "soft_costs_percentages": {
     "cm_fee": 0.0439,
     "insurance": 0.0121,

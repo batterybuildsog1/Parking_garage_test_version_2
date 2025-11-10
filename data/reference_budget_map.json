@@ -1,0 +1,89 @@
+{
+  "version": "1.0.0",
+  "description": "Presentation mapping to align our internal cost components to TechRidge reference budget categories without changing single-ownership calculations.",
+  "presentation_rules": {
+    "fold_vdc_into_gc": true,
+    "derive_mechanical_electrical_from_rates": true,
+    "rebucket_site_items": {
+      "to_interior_finishes": [
+        "sealed_concrete_parking_sf",
+        "final_cleaning_parking_sf"
+      ],
+      "to_special_systems": [
+        "pavement_markings_per_stall"
+      ]
+    }
+  },
+  "category_mappings": [
+    {
+      "tr_category": "Foundation & Below-Grade",
+      "components": ["foundation", "excavation"]
+    },
+    {
+      "tr_category": "Superstructure",
+      "components": [
+        "structure_above",
+        "structure_below",
+        "concrete_pumping",
+        "rebar",
+        "post_tensioning",
+        "core_walls",
+        "stairs",
+        "structural_accessories"
+      ]
+    },
+    {
+      "tr_category": "Exterior Closure",
+      "components": ["exterior"]
+    },
+    {
+      "tr_category": "Interior Finishes",
+      "components": ["interior_finishes"],
+      "include_from_site": ["sealed_concrete_parking_sf", "final_cleaning_parking_sf"]
+    },
+    {
+      "tr_category": "Special Systems",
+      "components": ["special_systems"],
+      "include_from_site": ["pavement_markings_per_stall"]
+    },
+    {
+      "tr_category": "Conveying Systems",
+      "components": ["elevators"]
+    },
+    {
+      "tr_category": "Mechanical",
+      "mep_components": ["fire_protection_parking_sf", "plumbing_parking_sf", "hvac_parking_sf"]
+    },
+    {
+      "tr_category": "Electrical",
+      "mep_components": ["electrical_parking_sf"]
+    },
+    {
+      "tr_category": "Site Work",
+      "components": ["site_finishes"],
+      "exclude_site_items": [
+        "sealed_concrete_parking_sf",
+        "final_cleaning_parking_sf",
+        "pavement_markings_per_stall"
+      ]
+    },
+    {
+      "tr_category": "General Conditions",
+      "components": ["general_conditions"],
+      "include_vdc": true
+    },
+    {
+      "tr_category": "CM Fee",
+      "components": ["cm_fee"]
+    },
+    {
+      "tr_category": "Insurance",
+      "components": ["insurance"]
+    },
+    {
+      "tr_category": "Contingency",
+      "components": ["contingency"]
+    }
+  ]
+}
+

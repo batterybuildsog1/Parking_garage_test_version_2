@@ -844,16 +844,12 @@ class CostCalculator:
         Calculate interior finishes for parking garage
 
         Includes:
-        - Sealed concrete finish (parking areas)
         - Wall/ceiling painting (cores, stairs, lobbies)
         - Commercial doors with hardware (stairs, elevators, utility rooms)
         - Door frame painting
-        - Final cleaning
+        NOTE: Sealed concrete and final cleaning are owned by Site Finishes to avoid double-counting.
         """
         cost = 0
-
-        # Sealed concrete finish - parking surface sealer/hardener
-        cost += garage.total_gsf * self.costs['site']['sealed_concrete_parking_sf']
 
         # Wall/ceiling painting - cores, stairs, elevator lobbies
         # Temporary proxy: $0.42/SF of building GSF (will be replaced with actual wall area calculation)
@@ -871,9 +867,6 @@ class CostCalculator:
         # Door frame painting
         cost += num_single_doors * self.component_costs['door_frame_painting_ea']
 
-        # Final cleaning
-        cost += garage.total_gsf * self.costs['site']['final_cleaning_parking_sf']
-
         return cost
 
     def _calculate_special_systems(self, garage: SplitLevelParkingGarage) -> float:
@@ -882,8 +875,8 @@ class CostCalculator:
 
         Includes:
         - Fire extinguishers with cabinets (code required)
-        - Pavement markings (striping per stall)
         - Knox box (fire department access)
+        NOTE: Pavement markings are owned by Site Finishes to avoid double-counting.
         """
         cost = 0
 
@@ -892,9 +885,6 @@ class CostCalculator:
         num_extinguishers = max(num_levels := garage.total_levels,
                                int(garage.total_gsf / 5000))
         cost += num_extinguishers * self.component_costs['fire_extinguisher_with_cabinet_ea']
-
-        # Pavement markings - striping per stall
-        cost += garage.total_stalls * self.costs['site']['pavement_markings_per_stall']
 
         # Knox box - fire department rapid entry (2 locations typical)
         cost += 2 * self.component_costs['knox_box_ea']
@@ -1691,8 +1681,14 @@ class CostCalculator:
         """
         Generate TechRidge budget comparison report
 
-        Maps model costs to TR budget categories and shows ALL TR line items
-        (including placeholders for scope not yet modeled).
+        Maps our internal single-owner cost components to TechRidge categories for
+        comparison, without changing how costs are calculated internally.
+
+        Presentation rules:
+        - VDC is folded into General Conditions (TR-style)
+        - MEP split is itemized from rates (Fire/Plumbing/HVAC vs Electrical)
+        - Site-owned items (sealed concrete, final cleaning, striping) re-bucketed
+          into TR Interior/Special categories for presentation only.
 
         Returns dict with:
         - tr_categories: List of TR line items with our mapped costs
@@ -1700,6 +1696,19 @@ class CostCalculator:
         - variance_pct: Overall percentage difference
         - unit_cost_comparison: $/SF and $/stall metrics
         """
+        # Load presentation mapping (configurable, but current code applies rules directly)
+        try:
+            data_dir = Path(__file__).parent.parent / 'data'
+            with open(data_dir / 'reference_budget_map.json', 'r') as f:
+                mapping_cfg = json.load(f)
+        except Exception:
+            mapping_cfg = {
+                "presentation_rules": {
+                    "fold_vdc_into_gc": True,
+                    "derive_mechanical_electrical_from_rates": True
+                }
+            }
+
         costs = self.calculate_all_costs(garage)
 
         # TechRidge parking budget from 1.2 SD Budget PDF (May 2025)
@@ -1784,17 +1793,52 @@ class CostCalculator:
 
         tr_total = 12_272_200  # Total parking portion from TR budget
 
-        # Build comparison categories
+        # Build our costs per TR category using presentation mapping rules
+        total_gsf = garage.total_gsf
+        total_stalls = garage.total_stalls
+
+        # Itemized MEP based on rates (aligns to TR categories)
+        fire_cost = total_gsf * self.costs['mep']['fire_protection_parking_sf']
+        plumbing_cost = total_gsf * self.costs['mep']['plumbing_parking_sf']
+        hvac_cost = total_gsf * self.costs['mep']['hvac_parking_sf']
+        electrical_cost = total_gsf * self.costs['mep']['electrical_parking_sf']
+
+        # Site items that are re-bucketed for TR presentation
+        sealed_concrete_cost = total_gsf * self.costs['site']['sealed_concrete_parking_sf']
+        final_cleaning_cost = total_gsf * self.costs['site']['final_cleaning_parking_sf']
+        striping_cost = total_stalls * self.costs['site']['pavement_markings_per_stall']
+
+        # TR category mappings
+        our_by_tr = {
+            "Foundation & Below-Grade": costs['foundation'] + costs['excavation'],
+            "Superstructure": (costs['structure_above'] + costs['structure_below'] +
+                               costs['concrete_pumping'] + costs['rebar'] +
+                               costs['post_tensioning'] + costs['core_walls'] +
+                               costs['stairs'] + costs['structural_accessories']),
+            "Exterior Closure": costs['exterior'],
+            # Interior includes painting/doors + re-bucketed sealed concrete + final cleaning
+            "Interior Finishes": (costs['interior_finishes'] +
+                                  sealed_concrete_cost + final_cleaning_cost),
+            # Special Systems includes our special + re-bucketed striping
+            "Special Systems": costs['special_systems'] + striping_cost,
+            "Conveying Systems": costs['elevators'],
+            "Mechanical": fire_cost + plumbing_cost + hvac_cost,
+            "Electrical": electrical_cost,
+            # Site Work excludes items re-bucketed to Interior/Special in presentation
+            "Site Work": (costs['site_finishes'] -
+                          sealed_concrete_cost - final_cleaning_cost - striping_cost),
+            # GC folds VDC for TR presentation only
+            "General Conditions": costs['general_conditions'] + (costs.get('vdc_coordination', 0) if mapping_cfg.get("presentation_rules", {}).get("fold_vdc_into_gc", True) else 0),
+            "CM Fee": costs['cm_fee'],
+            "Insurance": costs['insurance'],
+            "Contingency": costs['contingency']
+        }
+
+        # Build comparison categories against TR
         comparison_categories = []
 
         for category_name, category_data in tr_budget.items():
-            # Calculate our cost for this TR category
-            our_cost = 0
-            multiplier = category_data.get("our_cost_multiplier", 1.0)
-
-            for component in category_data["our_components"]:
-                if component in costs:
-                    our_cost += costs[component] * multiplier
+            our_cost = our_by_tr.get(category_name, 0)
 
             tr_cost = category_data["tr_cost"]
             variance = our_cost - tr_cost

@@ -253,10 +253,9 @@ class SplitLevelParkingGarage:
         # Footprint
         self.footprint_sf = self.width * self.length
 
-        # Perimeter per half-level
-        # In split-level ramp system, each half-level occupies ~50% of footprint
-        # Therefore perimeter per half-level = L + W (not 2×(L+W))
-        self.perimeter_lf = self.width + self.length
+        # Building perimeter (for exterior screen/walls)
+        # Full perimeter regardless of level geometry - screen wraps entire building
+        self.perimeter_lf = 2 * (self.width + self.length)
 
         # Total levels for split-level ramp system:
         #

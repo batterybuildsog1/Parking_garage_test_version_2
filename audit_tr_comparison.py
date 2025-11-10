@@ -145,29 +145,20 @@ def run_comprehensive_audit():
     print(f"Difference:              ${total_variance:>+12,.0f} ({pct_variance:+.1f}%)")
     print()
 
-    # Category-by-category comparison
-    print("CATEGORY-LEVEL COMPARISON:")
+    # Category-by-category comparison (TR-mapped)
+    print("CATEGORY-LEVEL COMPARISON (TR-MAPPED):")
     print("-" * 100)
-    print(f"{'Our Category':<30} {'Our Cost':>14} {'vs'} {'TR Category':>18} {'TR Cost':>14} {'Variance':>10}")
+    print(f"{'Category':<30} {'TR Cost':>14} {'Our Cost':>14} {'Variance':>14} {'%':>8}  Status")
     print("-" * 100)
-
-    # Map our categories to TR (some are split/combined)
-    mappings = [
-        ("Foundation + Excavation", costs['foundation'] + costs['excavation'], "Foundation & Below-Grade", 965_907),
-        ("Structure (All)", costs['structure_above'] + costs['structure_below'] + costs['concrete_pumping'] +
-         costs['rebar'] + costs['post_tensioning'] + costs['core_walls'] + costs['stairs'] +
-         costs['structural_accessories'], "Superstructure", 6_044_740),
-        ("MEP", costs['mep'], "Mechanical + Electrical", 859_444 + 413_806),
-        ("Exterior Screen", costs['exterior'], "Exterior Closure", 829_840),
-        ("Elevators", costs['elevators'], "Conveying Systems", 347_017),
-        ("Interior + Site", costs['interior_finishes'] + costs['site_finishes'], "Interior + Site", 313_766 + 403_382),
-        ("Special Systems", costs['special_systems'], "Special Systems", 50_200),
-    ]
-
-    for our_name, our_cost, tr_name, tr_cost in mappings:
-        variance_pct = (our_cost / tr_cost - 1) * 100 if tr_cost > 0 else 0
-        status = "✓" if abs(variance_pct) < 10 else "⚠️" if abs(variance_pct) < 20 else "❌"
-        print(f"{our_name:<30} ${our_cost:>12,.0f}  vs  {tr_name:>18} ${tr_cost:>12,.0f}  {variance_pct:>+6.1f}% {status}")
+    comparison = cost_calc.get_tr_comparison(garage)
+    for row in comparison["categories"]:
+        cat = row["category"]
+        tr_val = row["tr_cost"]
+        our_val = row["our_cost"]
+        var = row["variance"]
+        var_pct = row["variance_pct"]
+        status = row["status"]
+        print(f"{cat:<30} ${tr_val:>12,} ${our_val:>12,.0f} ${var:>+12,.0f} {var_pct:>+6.1f}%  {status}")
 
     print()
 

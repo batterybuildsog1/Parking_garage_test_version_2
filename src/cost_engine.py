@@ -290,6 +290,19 @@ class CostCalculator:
 
         cost += footing_cost
 
+        # Backfill (foundation + ramp)
+        # Foundation backfill: around footings after concrete placement
+        # Ramp backfill: entry ramp on compacted earth (not suspended)
+        if hasattr(garage, 'backfill_foundation_cy'):
+            backfill_foundation_cost = (garage.backfill_foundation_cy *
+                                       self.costs['foundation']['backfill_cy'])
+            cost += backfill_foundation_cost
+
+        if hasattr(garage, 'backfill_ramp_cy'):
+            backfill_ramp_cost = (garage.backfill_ramp_cy *
+                                 self.costs['foundation']['backfill_cy'])
+            cost += backfill_ramp_cost
+
         return cost
 
     def _calculate_excavation(self, garage: SplitLevelParkingGarage) -> float:
@@ -325,6 +338,11 @@ class CostCalculator:
 
         # Under-slab drainage
         cost += garage.footprint_sf * self.costs['below_grade_premiums']['under_slab_drainage_sf']
+
+        # Elevator pit waterproofing (1 elevator for parking garage)
+        if hasattr(garage, 'elevator_pit_waterproofing_sf'):
+            cost += (garage.elevator_pit_waterproofing_sf *
+                     self.costs['below_grade_premiums']['waterproofing_elevator_pit_sf'])
 
         return cost
 
@@ -428,7 +446,9 @@ class CostCalculator:
         """
         Calculate exterior wall/screening costs using discrete components
 
-        Brake metal parking screen on perimeter
+        Includes:
+        - Brake metal parking screen on perimeter
+        - High-speed overhead door (main entry gate)
         """
         # Exterior surface area (perimeter × height)
         exterior_sf = garage.exterior_wall_sf
@@ -436,6 +456,10 @@ class CostCalculator:
         # Parking screen unit cost ($82/SF from cost database)
         screen_cost_per_sf = self.costs['exterior']['parking_screen_sf']
         cost = exterior_sf * screen_cost_per_sf
+
+        # High-speed overhead door at main entry (1 EA per garage)
+        if hasattr(garage, 'high_speed_overhead_door_ea'):
+            cost += garage.high_speed_overhead_door_ea * self.costs['site']['high_speed_overhead_door_ea']
 
         return cost
 
@@ -448,6 +472,7 @@ class CostCalculator:
         - Pavement markings (striping, stall numbers, directional arrows)
         - Signage (wayfinding, ADA compliance)
         - Post-construction cleaning
+        - Site utilities (oil/water separator, storm drains)
 
         Uses discrete level GSF sum - NOT net area or footprint × levels
         """
@@ -465,6 +490,16 @@ class CostCalculator:
 
         # Final cleaning
         cost += total_parking_sf * self.costs['site']['final_cleaning_parking_sf']
+
+        # Site utilities (oil/water separator, storm drains)
+        if hasattr(garage, 'oil_water_separator_ea'):
+            cost += garage.oil_water_separator_ea * self.costs['site']['oil_water_separator_ea']
+
+        if hasattr(garage, 'storm_drain_48in_ads_ea'):
+            cost += garage.storm_drain_48in_ads_ea * self.costs['site']['storm_drain_48in_ads_ea']
+
+        if hasattr(garage, 'storm_drain_junction_box_6x6_ea'):
+            cost += garage.storm_drain_junction_box_6x6_ea * self.costs['site']['storm_drain_junction_box_6x6_ea']
 
         return cost
 
@@ -876,6 +911,7 @@ class CostCalculator:
         Includes:
         - Fire extinguishers with cabinets (code required)
         - Knox box (fire department access)
+        - Bicycle racks (amenity)
         NOTE: Pavement markings are owned by Site Finishes to avoid double-counting.
         """
         cost = 0
@@ -888,6 +924,10 @@ class CostCalculator:
 
         # Knox box - fire department rapid entry (2 locations typical)
         cost += 2 * self.component_costs['knox_box_ea']
+
+        # Bicycle racks (1 per 4 stalls from TR)
+        if hasattr(garage, 'bicycle_rack_ea'):
+            cost += garage.bicycle_rack_ea * self.costs['site']['bicycle_rack_ea']
 
         return cost
 
@@ -1808,10 +1848,10 @@ class CostCalculator:
         final_cleaning_cost = total_gsf * self.costs['site']['final_cleaning_parking_sf']
         striping_cost = total_stalls * self.costs['site']['pavement_markings_per_stall']
 
-        # TR category mappings
+        # TR category mappings (keys must match tr_budget keys exactly)
         our_by_tr = {
             "Foundation & Below-Grade": costs['foundation'] + costs['excavation'],
-            "Superstructure": (costs['structure_above'] + costs['structure_below'] +
+            "Superstructure - Parking": (costs['structure_above'] + costs['structure_below'] +
                                costs['concrete_pumping'] + costs['rebar'] +
                                costs['post_tensioning'] + costs['core_walls'] +
                                costs['stairs'] + costs['structural_accessories']),
@@ -1822,8 +1862,8 @@ class CostCalculator:
             # Special Systems includes our special + re-bucketed striping
             "Special Systems": costs['special_systems'] + striping_cost,
             "Conveying Systems": costs['elevators'],
-            "Mechanical": fire_cost + plumbing_cost + hvac_cost,
-            "Electrical": electrical_cost,
+            "Mechanical (Fire/Plumbing/HVAC)": fire_cost + plumbing_cost + hvac_cost,
+            "Electrical (Lighting/Power)": electrical_cost,
             # Site Work excludes items re-bucketed to Interior/Special in presentation
             "Site Work": (costs['site_finishes'] -
                           sealed_concrete_cost - final_cleaning_cost - striping_cost),
@@ -1831,7 +1871,8 @@ class CostCalculator:
             "General Conditions": costs['general_conditions'] + (costs.get('vdc_coordination', 0) if mapping_cfg.get("presentation_rules", {}).get("fold_vdc_into_gc", True) else 0),
             "CM Fee": costs['cm_fee'],
             "Insurance": costs['insurance'],
-            "Contingency": costs['contingency']
+            "Contingency": costs['contingency'],
+            "VDC Coordination": 0  # Not separately shown in TR, folded into GC
         }
 
         # Build comparison categories against TR

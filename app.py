@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
-from src.garage import SplitLevelParkingGarage, ParkingLayout, load_cost_database as load_geom_db
+from src.garage import SplitLevelParkingGarage, ParkingLayout, load_cost_database as load_geom_db, compute_width_ft
 from src.cost_engine import CostCalculator, load_cost_database
 from src.visualization import create_3d_parking_garage
 from visualize_parking_layout import create_overview_diagram_figure, create_per_level_diagram_figure
@@ -46,9 +46,9 @@ num_bays = st.sidebar.slider(
     help="Number of ramp bays (2 bays = 126', 3 bays = 190', etc.)"
 )
 
-# Calculate and display width
-calculated_width = (num_bays * 62) + ((num_bays - 1) * 2)
-st.sidebar.info(f"**Width: {calculated_width}'** ({num_bays} bays × 62' + {num_bays-1} cores × 2')")
+# Calculate and display width (single source of truth from geometry)
+calculated_width = compute_width_ft(num_bays)
+st.sidebar.info(f"**Width: {calculated_width:.0f}'**")
 
 length = st.sidebar.slider(
     "Length (feet)",

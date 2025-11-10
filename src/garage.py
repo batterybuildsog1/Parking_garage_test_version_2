@@ -28,7 +28,7 @@ from .geometry.parking_layout import ParkingLayout
 from .geometry.level_calculator import DiscreteLevelCalculator
 
 # Explicit exports for external use
-__all__ = ['SplitLevelParkingGarage', 'ParkingLayout', 'load_cost_database']
+__all__ = ['SplitLevelParkingGarage', 'ParkingLayout', 'load_cost_database', 'compute_width_ft']
 
 
 class SplitLevelParkingGarage:
@@ -220,6 +220,9 @@ class SplitLevelParkingGarage:
         self._calculate_structure()
         self._calculate_excavation()
         self._calculate_footings()
+        self._calculate_backfill()
+        self._calculate_elevator_pit_waterproofing()
+        self._calculate_parking_equipment()
 
     def _validate_inputs(self):
         """Validate input parameters against design constraints"""
@@ -1235,6 +1238,108 @@ class SplitLevelParkingGarage:
         self.total_footing_rebar_lbs = totals['rebar_lbs']
         self.total_footing_excavation_cy = totals['excavation_cy']
 
+    def _calculate_backfill(self):
+        """
+        Calculate backfill quantities for foundation and ramp
+
+        FOUNDATION BACKFILL (Per-SF Temporary Proxy):
+        - Backfill around footings after concrete placement
+        - TODO: Replace with discrete per-footing calculation when TR provides:
+          * Footing count by type (FS10.0, FS12.0, FC2.0, etc.)
+          * Backfill volume per footing type
+        - Current: 0.062 CY/SF empirical rate from TR budget
+          (TR: 1,639.72 CY ÷ 26,460 SF parking footprint = 0.062)
+
+        RAMP BACKFILL (Fixed Cost):
+        - Entry ramp backfill (on compacted earth, not suspended)
+        - Fixed at TR value: 2,397.33 CY per garage
+        - NOTE: Ramps are generally same size, 1 per garage in current model
+        - Will need adjustment if multiple ramps added or geometry changes
+        """
+        # Foundation backfill (per-SF proxy - will replace with discrete calc)
+        BACKFILL_FOUNDATION_RATE_CY_PER_SF = 0.062  # CY per SF of SOG (from TR)
+        self.backfill_foundation_cy = self.sog_levels_sf * BACKFILL_FOUNDATION_RATE_CY_PER_SF
+
+        # Ramp backfill (fixed cost per garage)
+        BACKFILL_RAMP_CY_PER_GARAGE = 2397.33  # From TR budget (1 ramp per garage)
+        self.backfill_ramp_cy = BACKFILL_RAMP_CY_PER_GARAGE
+
+    def _calculate_elevator_pit_waterproofing(self):
+        """
+        Calculate waterproofing SF for elevator pit surfaces touching earth
+
+        SCOPE:
+        - Pit floor (sits in earth below lowest level)
+        - Pit exterior walls (8' deep into earth)
+        - Uses EXTERIOR dimensions (interior + wall thickness)
+
+        GEOMETRY:
+        - Interior: 8' × 8' square (from line 811)
+        - CMU thickness: 8" = 0.67'
+        - Pit depth: 8' (from line 876)
+
+        TR REFERENCE vs CALCULATED:
+        - TR parking allocation: $9,614 ÷ $11/SF = 874 SF
+        - Our geometric calc: ~386 SF (pit floor + walls only)
+        - DISCREPANCY: 874 - 386 = 488 SF (~56% gap)
+        - Likely includes: shaft walls below grade, approach slab, over-excavation
+        - Using geometric calculation per component methodology
+        """
+        # Elevator interior dimensions (from _calculate_core_structure line 811)
+        ELEVATOR_INTERIOR_FT = 8.0
+        CMU_THICKNESS_FT = 0.67  # 8" CMU
+        PIT_DEPTH_FT = 8.0
+
+        # Exterior dimensions (for waterproofing on earth-facing side)
+        exterior_dim_ft = ELEVATOR_INTERIOR_FT + 2 * CMU_THICKNESS_FT  # 9.34'
+        exterior_perimeter_lf = 4 * exterior_dim_ft  # 37.36 LF
+
+        # Waterproofing surfaces (pit only, not shaft above)
+        pit_floor_sf = exterior_dim_ft * exterior_dim_ft  # 87 SF
+        pit_walls_sf = exterior_perimeter_lf * PIT_DEPTH_FT  # 299 SF
+
+        # Total (1 elevator for parking garage)
+        self.elevator_pit_waterproofing_sf = pit_floor_sf + pit_walls_sf  # 386 SF
+
+    def _calculate_parking_equipment(self):
+        """
+        Calculate parking equipment and site utilities
+
+        FIXED ITEMS (1 per garage):
+        - High-speed overhead door: Main entry gate (1 EA)
+        - Oil/water separator: Stormwater treatment (1 EA)
+        - Storm drain 48" ADS: Main collection (1 EA)
+
+        SCALED ITEMS:
+        - Storm drain junction boxes: 2 EA per garage (standard TR count)
+        - Bicycle racks: 1 per 4 stalls (TR: 80 EA ÷ 319 stalls = 0.25)
+
+        OPTIONAL ITEMS (not included by default, user toggle):
+        - Parking canopies: Would be 12 EA for TR reference (amenity)
+
+        TR REFERENCE:
+        - High-speed overhead door: $36,000 (1 EA)
+        - Oil/water separator: $13,500 (1 EA)
+        - Storm drain 48" ADS: $5,960 parking allocation (1 EA)
+        - Junction boxes 6'×6': $10,277 parking allocation (2 EA @ $12,500)
+        - Bicycle racks: $42,000 (80 EA @ $525)
+        """
+        # Fixed items (1 per garage)
+        self.high_speed_overhead_door_ea = 1  # Main entry gate
+        self.oil_water_separator_ea = 1       # Stormwater treatment
+        self.storm_drain_48in_ads_ea = 1      # Main drain collection
+
+        # Scaled items
+        self.storm_drain_junction_box_6x6_ea = 2  # Standard for parking garage
+
+        # Bicycle racks: 1 per 4 stalls (TR ratio: 80 EA ÷ 319 stalls ≈ 0.25)
+        BICYCLE_RACK_RATIO = 0.25  # 1 rack per 4 stalls
+        self.bicycle_rack_ea = int(self.total_stalls * BICYCLE_RACK_RATIO)
+
+        # Optional amenities (not included by default)
+        # User can toggle these on via UI parameters in future
+        # self.parking_canopy_ea = 0  # Would be 12 for TR reference size
+
     def get_level_name(self, level_index: int) -> str:
         """
         Get level name for given level index
@@ -1806,6 +1911,21 @@ class SplitLevelParkingGarage:
             mep=mep,
             site_finishes=site_finishes
         )
+
+
+def compute_width_ft(num_bays: int) -> float:
+    """
+    Compute building width in feet from number of bays using geometry constants.
+    Uses the same formula as SplitLevelParkingGarage to ensure a single source of truth.
+
+    Args:
+        num_bays: Number of parking bays (2-7)
+
+    Returns:
+        Building width in feet
+    """
+    return 1.0 + (num_bays * SplitLevelParkingGarage.PARKING_MODULE_WIDTH) + ((num_bays - 1) * SplitLevelParkingGarage.CENTER_SPACING)
+
 
 def load_cost_database() -> Dict:
     """Load cost database from JSON file"""

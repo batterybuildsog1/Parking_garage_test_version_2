@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
-from src.garage import SplitLevelParkingGarage, ParkingLayout, load_cost_database as load_geom_db, compute_width_ft
+from src.garage import SplitLevelParkingGarage, ParkingLayout, compute_width_ft
 from src.cost_engine import CostCalculator, load_cost_database
 from src.visualization import create_3d_parking_garage
 from visualize_parking_layout import create_overview_diagram_figure, create_per_level_diagram_figure
@@ -94,10 +94,14 @@ detected_system = RampSystemType.determine_optimal(length, num_bays)
 ramp_config = get_ramp_config(detected_system)
 level_height = ramp_config['level_height']
 
-# Total levels = all half-levels (entry is ONE OF them, not additional)
+# Total levels = all levels (interpretation depends on system)
 total_levels_display = half_levels_below + half_levels_above
-deepest = f"B-{half_levels_below / 2:.1f}" if half_levels_below > 0 else "P0.5"
-highest = f"P{half_levels_above / 2:.1f}"
+if detected_system == RampSystemType.SPLIT_LEVEL_DOUBLE:
+    deepest = f"B-{half_levels_below / 2:.1f}" if half_levels_below else "P0.5"
+    highest = f"P{half_levels_above / 2:.1f}"
+else:
+    deepest = f"B-{int(half_levels_below)}" if half_levels_below else "P1"
+    highest = f"P{int(half_levels_above)}"
 vertical_span_ft = total_levels_display * level_height
 
 st.sidebar.info(
@@ -258,7 +262,7 @@ try:
         )
 
     with col6:
-        system_short = "Split-Level" if garage.ramp_system.name == "SPLIT_LEVEL_DOUBLE" else "Single-Ramp"
+        system_short = "Split-Level" if garage.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE else "Single-Ramp"
         st.metric(
             "Ramp System",
             system_short,
@@ -449,7 +453,7 @@ try:
         st.subheader("3D Model")
 
         # Warning for single-ramp systems
-        if garage.ramp_system.name == "SINGLE_RAMP_FULL":
+        if garage.ramp_system == RampSystemType.SINGLE_RAMP_FULL:
             st.warning(
                 "⚠️ **3D visualization currently supports split-level systems only.**\n\n"
                 "Single-ramp 3D rendering will be added in a future update. "
@@ -484,14 +488,26 @@ try:
 
         # Floor range filter
         if garage.total_levels > 1:
-            floor_range = st.sidebar.slider(
-                "Show Floor Range",
-                min_value=0.5,
-                max_value=float(garage.half_levels_above / 2 + 0.5),
-                value=(0.5, float(garage.half_levels_above / 2 + 0.5)),
-                step=0.5,
-                help="Filter which floors to display"
-            )
+            if garage.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE:
+                floor_slider_max = float(garage.half_levels_above / 2 + 0.5)
+                floor_range = st.sidebar.slider(
+                    "Show Floor Range",
+                    min_value=0.5,
+                    max_value=floor_slider_max,
+                    value=(0.5, floor_slider_max),
+                    step=0.5,
+                    help="Filter which floors to display"
+                )
+            else:
+                floor_slider_max = float(garage.half_levels_above)
+                floor_range = st.sidebar.slider(
+                    "Show Floor Range",
+                    min_value=1.0,
+                    max_value=floor_slider_max,
+                    value=(1.0, floor_slider_max),
+                    step=1.0,
+                    help="Filter which floors to display"
+                )
         else:
             floor_range = None
 

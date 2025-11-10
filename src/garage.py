@@ -1078,8 +1078,11 @@ class SplitLevelParkingGarage:
         self.center_curb_concrete_cy = 0
         self.center_curb_sf = 0
         self.center_core_wall_sf = 0
-        self.concrete_core_wall_cy = 0
-        self.core_wall_area_sf = 0
+        self.center_core_wall_concrete_cy = 0
+
+        # Generic names for export (matches split-level pattern)
+        self.core_wall_area_sf = self.center_core_wall_sf
+        self.concrete_core_wall_cy = self.center_core_wall_concrete_cy
 
         # === RAMP EDGE BARRIERS (3+ BAY ONLY) ===
         if self.num_bays >= 3:

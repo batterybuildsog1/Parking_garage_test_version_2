@@ -440,11 +440,11 @@ def build_tr_comparison(costs: Dict[str, float], cost_db: Dict[str, Any], garage
         else:
             variance_pct = (variance / tr_val * 100.0)
             if abs(variance_pct) <= 10:
-                status = "✓"
+        status = "✓"
             elif abs(variance_pct) <= 20:
                 status = "⚠️"
             else:
-                status = "❌"
+            status = "❌"
             note = ""
         categories.append(
             {

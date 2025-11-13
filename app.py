@@ -1054,10 +1054,10 @@ try:
             )
 
         # ========== SECTION 4: STRUCTURE - REINFORCEMENT ==========
-        with st.expander("04 - STRUCTURE - REINFORCEMENT (Cost Attribution)", expanded=True):
+        with st.expander("04 - STRUCTURE - REINFORCEMENT (Slabs, Columns, PT)", expanded=True):
             section = detailed_data['04_reinforcement']
             st.markdown(f"**Section Total: ${section['total']:,.0f}**")
-            st.info("This section shows component-level attribution for all reinforcement: footing rebar, column rebar, slab rebar, wall rebar, and post-tensioning cables.")
+            st.info("This section shows structural reinforcement for suspended slabs, columns, and post-tension cables. Footing rebar appears in the Foundation section.")
 
             reinforcement_df = pd.DataFrame(section['items'])
             st.dataframe(
@@ -1218,6 +1218,95 @@ try:
             col3.metric("Avg SF/Stall", f"{section['total_gsf'] / section['total_stalls']:.1f} SF")
 
         st.markdown("---")
+        # Export (Excel) for sections only (excludes ledger and quantities)
+        st.markdown("### Download All Sections (Excel)")
+        def _run_export_audit() -> list:
+            failures = []
+            # 1) Ledger sum vs total
+            try:
+                ledger_sum = float(cost_items_df["total_cost"].sum()) if not cost_items_df.empty else 0.0
+                total_cost = float(costs["total"])
+                if abs(ledger_sum - total_cost) > 1.0:
+                    failures.append(f"Ledger total (${ledger_sum:,.0f}) != cost summary total (${total_cost:,.0f})")
+            except Exception as e:
+                failures.append(f"Ledger vs summary check failed: {e}")
+            # 2) Section totals integrity
+            try:
+                for key in ["01_foundation","02_excavation","03_concrete","04_reinforcement","05_walls_cores","06_vertical","07_mep","08_exterior","09_level_summary"]:
+                    sec = detailed_takeoffs if key == "09_level_summary" else detailed_data
+                    section_obj = detailed_takeoffs[key] if key in detailed_takeoffs else detailed_data[key]
+                    if key != "09_level_summary":
+                        items = section_obj.get("items", [])
+                        items_total = sum(float(i["total"]) for i in items if i.get("total") not in (None, ""))
+                        if abs(items_total - float(section_obj.get("total", 0.0))) > 1.0:
+                            failures.append(f"Section {key} items total (${items_total:,.0f}) != section total (${section_obj.get('total',0.0):,.0f})")
+            except Exception as e:
+                failures.append(f"Section total check failed: {e}")
+            # 3) Level summary coherence
+            try:
+                lvl = detailed_takeoffs["09_level_summary"]
+                gsf_sum = sum(float(r["gsf"]) for r in lvl["levels"])
+                stalls_sum = sum(int(r["stalls"]) for r in lvl["levels"])
+                if abs(gsf_sum - float(garage.total_gsf)) > 1.0:
+                    failures.append(f"Sum(level GSF) {gsf_sum:,.0f} != total_gsf {garage.total_gsf:,.0f}")
+                if stalls_sum != int(garage.total_stalls):
+                    failures.append(f"Sum(level stalls) {stalls_sum} != total_stalls {garage.total_stalls}")
+            except Exception as e:
+                failures.append(f"Level summary check failed: {e}")
+            return failures
+
+        audit_errors = _run_export_audit()
+        if audit_errors:
+            st.error("Export audit failed. Fix these items before download:")
+            for err in audit_errors:
+                st.write(f"- {err}")
+        else:
+            import io
+            import pandas as pd  # already imported above; safe to reuse
+            # Build workbook bytes (sections only)
+            def _build_sections_workbook_bytes() -> bytes:
+                buf = io.BytesIO()
+                # Try openpyxl first, then xlsxwriter; if neither present, raise
+                engine = None
+                for cand in ["openpyxl","xlsxwriter"]:
+                    try:
+                        with pd.ExcelWriter(buf, engine=cand) as writer:
+                            # Sections 01..08
+                            sheet_map = [
+                                ("01_Foundation", detailed_data["01_foundation"]),
+                                ("02_Excavation", detailed_data["02_excavation"]),
+                                ("03_Structure_Concrete", detailed_data["03_concrete"]),
+                                ("04_Reinforcement", detailed_data["04_reinforcement"]),
+                                ("05_Walls_Cores", detailed_data["05_walls_cores"]),
+                                ("06_Vertical", detailed_data["06_vertical"]),
+                                ("07_MEP", detailed_data["07_mep"]),
+                                ("08_Exterior", detailed_data["08_exterior"]),
+                            ]
+                            for sheet_name, sec in sheet_map:
+                                df = pd.DataFrame(sec["items"])
+                                if not df.empty:
+                                    df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+                                else:
+                                    pd.DataFrame([{"note":"no items"}]).to_excel(writer, index=False, sheet_name=sheet_name[:31])
+                            # 09 Level Summary
+                            lvl = detailed_data["09_level_summary"]
+                            pd.DataFrame(lvl["levels"]).to_excel(writer, index=False, sheet_name="09_Level_Summary")
+                        engine = cand
+                        break
+                    except Exception:
+                        engine = None
+                        continue
+                if engine is None:
+                    raise RuntimeError("Excel export requires 'openpyxl' or 'xlsxwriter' installed.")
+                buf.seek(0)
+                return buf.getvalue()
+
+            try:
+                xlsx_bytes = _build_sections_workbook_bytes()
+                st.download_button("Download All Sections (Excel)", xlsx_bytes, file_name="detailed_sections.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except Exception as e:
+                st.warning(f"Unable to build Excel workbook: {e}")
+
         st.markdown("### Cost Items Ledger")
         if cost_items_df.empty:
             st.info("No cost items recorded in the current scenario.")
@@ -1236,6 +1325,13 @@ try:
                 use_container_width=True,
                 hide_index=True,
             )
+            # Unique CSV download name for ledger
+            st.download_button(
+                "Download Ledger (CSV)",
+                ledger_df.to_csv(index=False).encode("utf-8"),
+                file_name="ledger.csv",
+                mime="text/csv"
+            )
 
         st.markdown("### Quantity Table")
         if quantities_df.empty:
@@ -1252,6 +1348,16 @@ try:
                 ].sort_values(["element_type", "name"]),
                 use_container_width=True,
                 hide_index=True,
+            )
+            # Unique CSV download name for quantities
+            qcsv = quantities_display.sort_values(["element_type","name"])[
+                ["element_type","name","measure","value","unit","source_pass","notes"]
+            ].to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Quantities (CSV)",
+                qcsv,
+                file_name="quantities.csv",
+                mime="text/csv"
             )
 
     with tab7:

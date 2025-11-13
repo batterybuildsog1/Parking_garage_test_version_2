@@ -642,22 +642,11 @@ class CostEngine:
         )
 
     def _retaining_wall_costs(self, garage) -> float:
-        retaining_sf = getattr(garage, "retaining_wall_sf", 0.0)
-        if retaining_sf == 0:
-            return 0.0
-        return self._add_cost_line(
-            element_key="structure:retaining_walls",
-            element_type="structural_component",
-            parent="structure",
-            measure="retaining_wall_area",
-            quantity=retaining_sf,
-            unit="SF",
-            unit_cost_key="below_grade_premiums.retaining_wall_cw12_sf",
-            unit_cost_value=self.costs["below_grade_premiums"]["retaining_wall_cw12_sf"],
-            category="structure",
-            description="Retaining Wall Concrete",
-            source_pass="structure",
-        )
+        """
+        Retaining wall concrete is recorded under Below-Grade (Excavation) to avoid double counting.
+        Intentionally returns 0 and writes no cost lines here.
+        """
+        return 0.0
 
     def _elevator_costs(self, garage) -> float:
         return self._add_cost_line(

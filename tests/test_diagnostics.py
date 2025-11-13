@@ -44,3 +44,4 @@ def test_min_diagnostics_schema_smoke():
     assert "passes" in il and "all" in il["passes"]
 
 
+

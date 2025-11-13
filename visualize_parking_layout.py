@@ -77,3 +77,4 @@ def create_per_level_diagram_figure(
 
     return fig
 
+

@@ -439,12 +439,8 @@ def build_tr_comparison(costs: Dict[str, float], cost_db: Dict[str, Any], garage
             note = "No baseline value provided in TechRidge extract"
         else:
             variance_pct = (variance / tr_val * 100.0)
-            if abs(variance_pct) <= 10:
-        status = "✓"
-            elif abs(variance_pct) <= 20:
-                status = "⚠️"
-            else:
-            status = "❌"
+            abs_var = abs(variance_pct)
+            status = "✓" if abs_var <= 10 else ("⚠️" if abs_var <= 20 else "❌")
             note = ""
         categories.append(
             {

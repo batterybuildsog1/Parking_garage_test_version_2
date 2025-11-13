@@ -92,12 +92,22 @@ def get_ramp_config(ramp_system: RampSystemType) -> dict:
             'floor_to_floor': FLOOR_TO_FLOOR_SPLIT,
             'level_height': LEVEL_HEIGHT_SPLIT,
             'ramp_slope': RAMP_SLOPE_SPLIT_LEVEL,
-            'is_half_level': True
+            'is_half_level': True,
+            # Centralized geometry parameters (kept consistent across engine/visualization)
+            'turn_zone_depth': 48,
+            'entry_width': 27,
+            'flat_entry_length': 100,
+            'ramp_termination_length': 40
         }
     else:  # SINGLE_RAMP_FULL
         return {
             'floor_to_floor': FLOOR_TO_FLOOR_SINGLE,
             'level_height': LEVEL_HEIGHT_SINGLE,
             'ramp_slope': RAMP_SLOPE_SINGLE_RAMP,
-            'is_half_level': False
+            'is_half_level': False,
+            # Same defaults unless we introduce system-specific variations later
+            'turn_zone_depth': 48,
+            'entry_width': 27,
+            'flat_entry_length': 100,
+            'ramp_termination_length': 40
         }

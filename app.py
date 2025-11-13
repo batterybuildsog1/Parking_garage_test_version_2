@@ -8,8 +8,20 @@ import plotly.graph_objects as go
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
-from src.garage import SplitLevelParkingGarage, ParkingLayout, compute_width_ft
-from src.cost_engine import CostCalculator, load_cost_database
+from typing import Any, Dict
+from src.garage import ParkingLayout, compute_width_ft
+from src.cost_engine import load_cost_database
+from src.pipeline import run_scenario
+from src.reporting import (
+    build_detailed_takeoffs as reporting_build_detailed_takeoffs,
+    build_tr_comparison as reporting_build_tr_comparison,
+    build_tr_aligned_breakdown as reporting_build_tr_aligned_breakdown,
+)
+
+
+build_detailed_takeoffs = reporting_build_detailed_takeoffs
+build_tr_comparison = reporting_build_tr_comparison
+
 from src.visualization import create_3d_parking_garage
 from visualize_parking_layout import create_overview_diagram_figure, create_per_level_diagram_figure
 
@@ -163,7 +175,7 @@ soil_bearing_capacity = st.sidebar.number_input(
     "Allowable Bearing Capacity (PSF)",
     min_value=1000,
     max_value=15000,
-    value=2000,
+    value=3500,
     step=500,
     help="From geotechnical report. Typical values:\n• 2000-4000 PSF: Clay/Silt\n• 4000-8000 PSF: Sand/Gravel\n• 8000+ PSF: Rock/Engineered Fill\n\n⚠️ Footing costs shown use gravity loads only (1.2D + 1.6L). Excludes wind/seismic/uplift effects."
 )
@@ -189,6 +201,12 @@ with st.sidebar.expander("Additional Soil Properties (Advanced)"):
 
 st.sidebar.markdown("### Load Assumptions")
 
+reduce_live_load = st.sidebar.checkbox(
+    "Reduce Live Load with Level Count (ASCE 7/IBC)",
+    value=True,
+    help="Apply a standard live load reduction for columns supporting multiple levels. You can turn this off to be conservative."
+)
+
 dead_load_psf = st.sidebar.number_input(
     "Dead Load (PSF)",
     min_value=50.0,
@@ -207,19 +225,45 @@ live_load_psf = st.sidebar.number_input(
     help="Live load per square foot:\n• 50 PSF: Parking garage (IBC 2021 Table 1607.1)\n• 100 PSF: Stairs (IBC code requirement)\n• 125 PSF: Storage areas (IBC code requirement)"
 )
 
+# Advanced settings
+with st.sidebar.expander("Advanced"):
+    ramp_termination_length = st.number_input(
+        "Ramp Termination Length (ft)",
+        min_value=20,
+        max_value=80,
+        value=40,
+        step=1,
+        help="Flat zone at ramp termination (default 40')."
+    )
+
 # Calculate garage
 try:
-    garage = SplitLevelParkingGarage(
-        length=length,
-        half_levels_above=half_levels_above,
-        half_levels_below=half_levels_below,
-        num_bays=num_bays,
-        soil_bearing_capacity=soil_bearing_capacity,
-        dead_load_psf=dead_load_psf,
-        live_load_psf=live_load_psf
+    scenario_inputs = {
+        "length": length,
+        "half_levels_above": half_levels_above,
+        "half_levels_below": half_levels_below,
+        "num_bays": num_bays,
+        "ramp_system": detected_system,
+        "ramp_termination_length": ramp_termination_length,
+        "soil_bearing_capacity": soil_bearing_capacity,
+        "allow_ll_reduction": reduce_live_load,
+        "dead_load_psf": dead_load_psf,
+        "live_load_psf": live_load_psf,
+    }
+    result = run_scenario(
+        inputs=scenario_inputs,
+        cost_database=cost_db,
+        gc_params=gc_params
     )
-    calculator = CostCalculator(cost_db)
-    costs = calculator.calculate_all_costs(garage, gc_params=gc_params)
+    garage = result.garage
+    diagnostics = result.diagnostics if hasattr(result, "diagnostics") else {}
+    geom_diag = diagnostics.get("geometry", {})
+    costs = result.cost_summary
+    cost_items_df = result.table("cost_items")
+    quantities_df = result.table("quantities")
+    elements_df = result.table("elements")
+    detailed_takeoffs = build_detailed_takeoffs(cost_items_df, garage)
+    tr_comparison_data = build_tr_comparison(costs, cost_db, garage)
     summary = garage.get_summary()
 
     # === METRICS ROW ===
@@ -300,7 +344,7 @@ try:
 
         Returns PNG bytes for display with st.image()
         """
-        layout = ParkingLayout(width, length, num_bays)
+        layout = ParkingLayout(width, length, num_bays, turn_zone_depth=_garage.TURN_ZONE_DEPTH)
         layout.apply_core_blockages()
         fig = create_overview_diagram_figure(_garage, layout, _opt_result)
 
@@ -320,7 +364,7 @@ try:
 
         Returns PNG bytes for display with st.image()
         """
-        layout = ParkingLayout(width, length, num_bays)
+        layout = ParkingLayout(width, length, num_bays, turn_zone_depth=_garage.TURN_ZONE_DEPTH)
         layout.apply_core_blockages()
         fig = create_per_level_diagram_figure(_garage, layout, level_name, _opt_result)
 
@@ -449,6 +493,232 @@ try:
                 ])
                 st.dataframe(ex_df, use_container_width=True, hide_index=True)
 
+        # === STRUCTURAL CHECKS SUMMARY ===
+        st.markdown("### Structural Checks")
+        col1, col2, col3 = st.columns(3)
+        studs = getattr(garage, 'stud_rail_required_joints', 0)
+        lvl_val = getattr(garage, 'per_level_area_validation', [])
+        if lvl_val:
+            variances = [abs(v.get('variance_pct', 0.0)) for v in lvl_val]
+            max_var = max(variances) if variances else 0.0
+            within2 = sum(1 for v in variances if v < 2.0)
+            total_lvls = len(variances)
+        else:
+            max_var = 0.0
+            within2 = 0
+            total_lvls = 0
+        with col1:
+            st.metric("Stud Rail Joints Required", f"{int(studs)}", help="Count of slab-column joints requiring stud rails (punching utilization > 1.0).")
+        with col2:
+            st.metric("Max Level Area Variance", f"{max_var:.1f}%", help="Max |(Sum column areas − GSF)/GSF| across levels.")
+        with col3:
+            st.metric("Levels within 2%", f"{within2}/{total_lvls}", help="Per-level area conservation check within ±2%.")
+
+        # === DIAGNOSTICS (MVP) ===
+        with st.expander("Diagnostics (MVP)"):
+            # Columns/Floors summary
+            c_cols, c_floors, c_rebar = st.columns(3)
+
+            with c_cols:
+                cols_info = geom_diag.get("components", {}).get("columns", {})
+                st.markdown("**Columns**")
+                st.metric("Total Columns", f"{cols_info.get('total_count', 0)}")
+                per_level = cols_info.get("per_level", [])
+                if per_level:
+                    st.dataframe(pd.DataFrame(per_level), use_container_width=True, hide_index=True)
+
+            with c_floors:
+                floors_info = geom_diag.get("components", {}).get("floors", {})
+                st.markdown("**Floors**")
+                st.metric("Total Levels", f"{floors_info.get('total_levels', 0)}")
+                lvl_rows = floors_info.get("levels", [])
+                if lvl_rows:
+                    st.dataframe(pd.DataFrame(lvl_rows), use_container_width=True, hide_index=True)
+
+            with c_rebar:
+                rebar = geom_diag.get("components", {}).get("rebar", {})
+                st.markdown("**Rebar (Slabs + Footings)**")
+                st.text(f"SOG SF: {rebar.get('sog_sf', 0):,.0f} @ {rebar.get('sog_rebar_rate_lbs_per_sf', 0):.2f} lb/SF")
+                st.text(f"Suspended SF: {rebar.get('suspended_slab_sf', 0):,.0f} @ {rebar.get('suspended_rebar_rate_lbs_per_sf', 0):.2f} lb/SF")
+                st.text(f"SOG Rebar: {rebar.get('sog_rebar_lbs', 0):,.0f} lb")
+                st.text(f"Suspended Rebar: {rebar.get('suspended_slab_rebar_lbs', 0):,.0f} lb")
+                st.text(f"Footing Rebar: {rebar.get('total_footing_rebar_lbs', 0):,.0f} lb")
+                st.metric("Total Rebar (All)", f"{rebar.get('total_rebar_lbs_all', 0):,.0f} lb")
+
+            # Retaining walls + cores
+            c_ret, c_cores = st.columns(2)
+            with c_ret:
+                walls = geom_diag.get("components", {}).get("retaining_walls", {})
+                st.markdown("**Retaining Walls**")
+                st.text(f"Perimeter: {walls.get('perimeter_lf', 0):,.0f} LF")
+                st.text(f"Total Area: {walls.get('total_area_sf', 0):,.0f} SF")
+                st.text(f"Tracked Area: {walls.get('tracked_total_area_sf', 0):,.0f} SF")
+                per_lvl = walls.get("area_sf_by_level", [])
+                if per_lvl:
+                    st.dataframe(pd.DataFrame(per_lvl), use_container_width=True, hide_index=True)
+            with c_cores:
+                cores = geom_diag.get("components", {}).get("cores", {})
+                st.markdown("**Cores**")
+                st.text(f"Stairs: {cores.get('num_stairs', 0)}")
+                st.text(f"Stair Flights: {cores.get('num_stair_flights', 0)}")
+                st.text(f"Elevator Stops: {cores.get('num_elevator_stops', 0)}")
+
+            # Imposed load reconciliation
+            st.markdown("**Imposed Load Reconciliation**")
+            il = geom_diag.get("imposed_load_check", {})
+            modeled = il.get("modeled", {})
+            expected = il.get("expected", {})
+            deltas = il.get("deltas_pct", {})
+            tol = il.get("tolerance_pct", 3.0)
+            passes = il.get("passes", {})
+            col_a, col_b, col_c, col_d = st.columns(4)
+            with col_a:
+                st.metric("DL Modeled", f"{modeled.get('dl_lb_total', 0):,.0f} lb")
+                st.metric("DL Expected", f"{expected.get('dl_lb_total', 0):,.0f} lb")
+                st.metric("DL Δ%", f"{deltas.get('dl', 0.0):+.1f}%")
+            with col_b:
+                st.metric("LL Modeled", f"{modeled.get('ll_lb_total', 0):,.0f} lb")
+                st.metric("LL Expected", f"{expected.get('ll_lb_total', 0):,.0f} lb")
+                st.metric("LL Δ%", f"{deltas.get('ll', 0.0):+.1f}%")
+            with col_c:
+                st.metric("Total Modeled", f"{modeled.get('total_lb', 0):,.0f} lb")
+                st.metric("Total Expected", f"{expected.get('total_lb', 0):,.0f} lb")
+                st.metric("Total Δ%", f"{deltas.get('total', 0.0):+.1f}%")
+            with col_d:
+                badge = "✅ PASS" if passes.get("all") else "❌ FAIL"
+                st.metric("Tolerance", f"±{tol:.1f}%", badge)
+
+        # === COLUMNS (Per-element detail) ===
+        st.markdown("### Columns (Per-Element Details)")
+        columns = getattr(garage, 'columns', [])
+        if not columns:
+            st.info("No columns generated for this configuration.")
+        else:
+            # Build overview table
+            over_rows = []
+            for i, c in enumerate(columns):
+                area_sf = (c['width_in'] / 12.0) * (c['depth_in'] / 12.0)
+                vol_cy = (area_sf * garage.total_height_ft) / 27.0
+                over_rows.append({
+                    "Index": i + 1,
+                    "X (ft)": round(c['x'], 2),
+                    "Y (ft)": round(c['y'], 2),
+                    "Type": c.get('y_line_type', ''),
+                    "Size (in)": f"{int(c['width_in'])}x{int(c['depth_in'])}",
+                    "Concrete (CY)": round(vol_cy, 3)
+                })
+            st.dataframe(pd.DataFrame(over_rows), use_container_width=True, hide_index=True)
+
+            # Select a column for details
+            sel_idx = st.selectbox("Select Column", options=list(range(1, len(columns) + 1)), index=0)
+            c = columns[sel_idx - 1]
+            area_sf = (c['width_in'] / 12.0) * (c['depth_in'] / 12.0)
+            col_vol_cy = (area_sf * garage.total_height_ft) / 27.0
+            col_self_weight = area_sf * garage.total_height_ft * 150.0  # lbs
+
+            # Tributary area (aligned with calculator defaults)
+            spacing_ft = getattr(garage, 'column_spacing_ft', 31.0)
+            ytype = c.get('y_line_type')
+            if ytype == 'ramp_center':
+                trib_sf = spacing_ft * spacing_ft
+            elif ytype == 'perimeter':
+                trib_sf = spacing_ft * (spacing_ft / 2.0)
+            else:
+                trib_sf = spacing_ft * spacing_ft
+
+            # Floors supported (equivalent full floors)
+            eq_floors = garage.total_gsf / garage.footprint_sf if garage.footprint_sf > 0 else 0.0
+            ll_psf_eff = live_load_psf
+            if reduce_live_load and eq_floors >= 2.0:
+                ll_psf_eff = 0.8 * live_load_psf
+            dl_total = trib_sf * dead_load_psf * eq_floors
+            ll_total = trib_sf * ll_psf_eff * eq_floors
+            service_load = dl_total + ll_total + col_self_weight
+            factored_load = garage.load_factor_dl * (dl_total + col_self_weight) + garage.load_factor_ll * ll_total
+
+            # Find nearest footing (by plan distance)
+            nearest = None
+            nearest_d = None
+            for f_list in getattr(garage, 'spread_footings_by_type', {}).values():
+                for f in f_list:
+                    fx, fy = f.get('x'), f.get('y')
+                    if fx is None or fy is None:
+                        continue
+                    d = ((fx - c['x']) ** 2 + (fy - c['y']) ** 2) ** 0.5
+                    if nearest is None or d < nearest_d:
+                        nearest = f
+                        nearest_d = d
+
+            # Cost list (column + footing, using unit costs)
+            uc = cost_db.get("unit_costs", {})
+            cs = cost_db.get("component_specific_costs", {})
+            col_unit_cy = uc.get("structure", {}).get("columns_18x24_cy", 0.0)
+            col_conc_cost = col_vol_cy * col_unit_cy
+            rebar_per_cy = cs.get("rebar_columns_lbs_per_cy_concrete", 0.0)
+            rebar_lb_rate = cs.get("rebar_cost_per_lb", 0.0)
+            col_rebar_lbs = col_vol_cy * rebar_per_cy
+            col_rebar_cost = col_rebar_lbs * rebar_lb_rate
+
+            footing_items = []
+            if nearest:
+                f_conc_cy = nearest.get("concrete_cy", 0.0)
+                f_rebar_lbs = nearest.get("rebar_lbs", 0.0)
+                f_exc_cy = nearest.get("excavation_cy", 0.0)
+                f_conc_cost = f_conc_cy * uc.get("foundation", {}).get("footings_spot_cy", 0.0)
+                f_rebar_cost = f_rebar_lbs * rebar_lb_rate
+                f_exc_cost = f_exc_cy * uc.get("foundation", {}).get("excavation_footings_cy", 0.0)
+                footing_items = [
+                    {"Component": "Footing Concrete", "Quantity": f_conc_cy, "Unit": "CY", "Cost": f_conc_cost},
+                    {"Component": "Footing Rebar", "Quantity": f_rebar_lbs, "Unit": "LB", "Cost": f_rebar_cost},
+                    {"Component": "Footing Excavation", "Quantity": f_exc_cy, "Unit": "CY", "Cost": f_exc_cost},
+                ]
+
+            cost_rows = [
+                {"Component": "Column Concrete", "Quantity": round(col_vol_cy, 3), "Unit": "CY", "Cost": col_conc_cost},
+                {"Component": "Column Rebar", "Quantity": round(col_rebar_lbs, 1), "Unit": "LB", "Cost": col_rebar_cost},
+                {"Component": "Stud Rails (Slab)", "Quantity": 0, "Unit": "LB", "Cost": 0},
+            ] + footing_items
+            st.markdown("#### Cost Attribution (Per Selected Column)")
+            st.dataframe(pd.DataFrame(cost_rows).style.format({"Quantity": "{:,.2f}", "Cost": "${:,.2f}"}), use_container_width=True, hide_index=True)
+
+            # Loads table
+            loads_rows = [
+                {"Metric": "Tributary Area", "Value": trib_sf, "Unit": "SF"},
+                {"Metric": "Equivalent Floors", "Value": eq_floors, "Unit": "-"},
+                {"Metric": "DL (slab)", "Value": dl_total, "Unit": "LB"},
+                {"Metric": "LL (slab, reduced)", "Value": ll_total, "Unit": "LB"},
+                {"Metric": "Column Self-Weight", "Value": col_self_weight, "Unit": "LB"},
+                {"Metric": "Service Load", "Value": service_load, "Unit": "LB"},
+                {"Metric": "Factored Load", "Value": factored_load, "Unit": "LB"},
+            ]
+            st.markdown("#### Loads (Approximate)")
+            st.dataframe(pd.DataFrame(loads_rows).style.format({"Value": "{:,.0f}"}), use_container_width=True, hide_index=True)
+
+            # Per-level areas & loads
+            per_col_levels = getattr(garage, 'per_level_column_data', [])
+            if per_col_levels and len(per_col_levels) >= sel_idx:
+                st.markdown("#### Per-level Areas & Loads")
+                lvl_entries = per_col_levels[sel_idx - 1]
+                lvl_df = pd.DataFrame([{
+                    "Level": f"{e.get('level_index')}:{e.get('level_name','')}",
+                    "Area (SF)": e.get('area_sf', 0.0),
+                    "DL (lb)": e.get('dl_lb', 0.0),
+                    "LL (lb)": e.get('ll_lb', 0.0),
+                    "Service (lb)": e.get('service_lb', 0.0),
+                    "Factored (lb)": e.get('factored_lb', 0.0),
+                    "Punch Util": e.get('punch_utilization', None),
+                    "Stud Rails": "Req" if e.get('stud_rails_required') else "",
+                    "Suspended": "Yes" if e.get('slab_type') == 'suspended' else "No"
+                } for e in lvl_entries])
+                st.dataframe(lvl_df.style.format({
+                    "Area (SF)": "{:,.1f}",
+                    "DL (lb)": "{:,.0f}",
+                    "LL (lb)": "{:,.0f}",
+                    "Service (lb)": "{:,.0f}",
+                    "Factored (lb)": "{:,.0f}",
+                    "Punch Util": "{:.2f}"
+                }), use_container_width=True, hide_index=True)
+
     with tab3:
         st.subheader("3D Model")
 
@@ -466,10 +736,11 @@ try:
 
         # Layer visibility
         show_slabs = st.sidebar.checkbox("Floor Slabs", value=True, help="Show discrete level floor plates")
-        show_columns = st.sidebar.checkbox("Structural Columns", value=True, help="Show 31' × 31' column grid")
-        show_walls = st.sidebar.checkbox("Center Elements", value=True, help="Show center core walls and curbs (split-level only)")
+        show_columns = st.sidebar.checkbox("Structural Columns", value=True, help="Show columns from the structural generator (≤31' spans)")
+        show_walls = st.sidebar.checkbox("Center Elements", value=True, help="Show ramp edge barriers (split-level only)")
         show_circulation = st.sidebar.checkbox("Circulation Paths", value=False, help="Show optional traffic flow paths")
         show_half_levels = st.sidebar.checkbox("Half-Levels", value=True, help="Show half-level floor plates (P1.5, P2.5, etc.)")
+        simplify_slabs = st.sidebar.checkbox("Simplified Slabs (Horizontal)", value=False, help="Render horizontal planes instead of helical ramps for clarity/performance")
 
         # Building features
         st.sidebar.markdown("---")
@@ -518,22 +789,25 @@ try:
                 show_slabs=show_slabs,
                 show_columns=show_columns,
                 show_walls=show_walls,
+                show_footings=True,
                 show_circulation=show_circulation,
                 show_half_levels=show_half_levels,
                 show_barriers=show_barriers,
                 show_cores=show_cores,
                 show_entrance=show_entrance,
                 floor_range=floor_range,
-                camera_preset=camera_view.lower()
+                camera_preset=camera_view.lower(),
+                simplify_slabs=simplify_slabs
             )
 
             # Display 3D model
             st.plotly_chart(fig_3d, use_container_width=True, key="garage_3d")
+            st.caption("Note: Footings shown are conceptual for planning and cost purposes only (not for construction).")
 
             # Building info below model
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Footprint", f"{garage.width:.0f}' × {garage.length:.0f}'")
-            col2.metric("Total Levels", garage.total_levels)
+            col2.metric("Total Levels", len(garage.levels))
             col3.metric("Height", f"{garage.total_height_ft:.1f}'")
             col4.metric("Columns", garage.num_columns)
 
@@ -702,7 +976,7 @@ try:
         st.markdown("Complete component-level breakdown with quantities, units, unit costs, and total costs.")
 
         # Get detailed takeoffs data
-        detailed_data = calculator.get_detailed_quantity_takeoffs(garage)
+        detailed_data = detailed_takeoffs
 
         # ========== SECTION 1: FOUNDATION ==========
         with st.expander("01 - FOUNDATION", expanded=False):
@@ -880,7 +1154,7 @@ try:
 
         # ========== SECTION 8: EXTERIOR & FINISHES ==========
         with st.expander("08 - EXTERIOR & FINISHES", expanded=False):
-            section = detailed_data['08_exterior_finishes']
+            section = detailed_data['08_exterior']
             st.markdown(f"**Section Total: ${section['total']:,.0f}**")
 
             exterior_df = pd.DataFrame(section['items'])
@@ -943,12 +1217,49 @@ try:
             col2.metric("Avg Stalls/Level", f"{section['total_stalls'] / len(section['levels']):.1f}")
             col3.metric("Avg SF/Stall", f"{section['total_gsf'] / section['total_stalls']:.1f} SF")
 
+        st.markdown("---")
+        st.markdown("### Cost Items Ledger")
+        if cost_items_df.empty:
+            st.info("No cost items recorded in the current scenario.")
+        else:
+            ledger_df = cost_items_df[
+                ["category", "description", "unit", "quantity", "unit_cost", "total_cost", "source_pass"]
+            ].sort_values("total_cost", ascending=False)
+            st.dataframe(
+                ledger_df.style.format(
+                    {
+                        "quantity": "{:,.2f}",
+                        "unit_cost": "${:,.2f}",
+                        "total_cost": "${:,.0f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("### Quantity Table")
+        if quantities_df.empty:
+            st.info("No quantities recorded.")
+        else:
+            quantities_display = quantities_df.merge(
+                elements_df[["element_id", "element_type", "name"]],
+                on="element_id",
+                how="left",
+            )
+            st.dataframe(
+                quantities_display[
+                    ["element_type", "name", "measure", "value", "unit", "source_pass", "notes"]
+                ].sort_values(["element_type", "name"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     with tab7:
         st.subheader("TechRidge Budget Comparison")
         st.markdown("Compare model costs against TechRidge 1.2 SD Budget (May 2025 PDF)")
 
         # Get TR comparison data
-        tr_comparison = calculator.get_tr_comparison(garage)
+        tr_comparison = tr_comparison_data
 
         # Overall Summary
         st.markdown("### Overall Variance")
@@ -1004,7 +1315,7 @@ try:
                 "Variance": cat['variance'],
                 "Variance %": cat['variance_pct'],
                 "Status": cat['status'],
-                "Notes": cat['notes']
+                "Notes": cat.get('notes', '')
             })
 
         categories_df = pd.DataFrame(categories_data)
@@ -1033,15 +1344,18 @@ try:
         # Key Findings
         st.markdown("### Key Findings")
 
-        # Count variances by severity
-        within_10 = sum(1 for cat in tr_comparison['categories'] if abs(cat['variance_pct']) < 10 and cat['tr_cost'] > 0)
-        within_20 = sum(1 for cat in tr_comparison['categories'] if 10 <= abs(cat['variance_pct']) < 20 and cat['tr_cost'] > 0)
-        over_20 = sum(1 for cat in tr_comparison['categories'] if abs(cat['variance_pct']) >= 20 and cat['tr_cost'] > 0)
+        # Count by status (ignore categories with no baseline)
+        within_10 = sum(1 for cat in tr_comparison['categories'] if cat.get('status') == "✓")
+        within_20 = sum(1 for cat in tr_comparison['categories'] if cat.get('status') == "⚠️")
+        over_20 = sum(1 for cat in tr_comparison['categories'] if cat.get('status') == "❌")
+        na_missing = sum(1 for cat in tr_comparison['categories'] if cat.get('status') == "N/A")
 
         col1, col2, col3 = st.columns(3)
         col1.metric("✓ Within 10%", f"{within_10} categories")
         col2.metric("⚠️ Within 20%", f"{within_20} categories")
         col3.metric("❌ Over 20%", f"{over_20} categories")
+        if na_missing:
+            st.caption(f"ℹ️ {na_missing} categories have no baseline value (marked N/A).")
 
         st.markdown("#### Notes:")
         st.markdown("""
@@ -1051,6 +1365,35 @@ try:
         - **VDC Coordination** is in our model but not separately broken out in TR (likely in GC)
         - **Overall +9.2% variance** is acceptable given design differences
         """)
+
+        # TR-Aligned Ledger Breakdown
+        st.markdown("### TR-Aligned Ledger (Our Lines Mapped to TR Buckets)")
+        tr_aligned = reporting_build_tr_aligned_breakdown(cost_items_df)
+
+        # Totals by TR bucket (compact summary bar)
+        totals_rows = [{"TR Category": k, "Our Total": v} for k, v in tr_aligned["totals_by_tr"].items()]
+        totals_df = pd.DataFrame(totals_rows)
+        st.dataframe(
+            totals_df.style.format({"Our Total": "${:,.0f}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Detailed lines
+        lines_df = pd.DataFrame(tr_aligned["rows"])
+        if not lines_df.empty:
+            st.dataframe(
+                lines_df.sort_values(["tr_category", "total"], ascending=[True, False]).style.format({
+                    "quantity": "{:,.2f}",
+                    "unit_cost": "${:,.2f}",
+                    "total": "${:,.0f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+            # Export button
+            csv_bytes = lines_df.to_csv(index=False).encode("utf-8")
+            st.download_button("Download TR-Aligned Ledger (CSV)", csv_bytes, file_name="tr_aligned_ledger.csv", mime="text/csv")
 
 except Exception as e:
     st.error(f"Error calculating garage: {str(e)}")

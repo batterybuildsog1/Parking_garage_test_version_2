@@ -1,3 +1,10 @@
+# Generated artefacts
+artifacts/
+*.csv
+streamlit.log
+
+# Virtual environment
+/venv/
 # Python
 __pycache__/
 *.py[cod]

@@ -1,1975 +1,991 @@
 """
-Cost calculation engine for split-level parking garage
+Table-driven cost engine.
 
-Applies unit costs from cost_database.json to parametric geometry calculations.
-
-KEY PRINCIPLE: Component-by-Component Takeoffs
-All costs calculated using discrete quantity takeoffs - no formula-based extrapolation:
-- Foundation: SOG area from discrete levels × unit costs
-- Structure: Concrete CY, rebar LBS, PT cables LBS from geometry engine
-- MEP & Finishes: Uses garage.total_gsf (sum of discrete level GSF)
-- Vertical circulation: Elevator stops, stair flights from geometry
-- Below-grade: Excavation CY, retaining walls SF, waterproofing
-
-IMPORTANT: Uses discrete level GSF sum (garage.total_gsf), not footprint × levels
-See DISCRETE_LEVELS_GUIDE.md for floor area calculation methodology.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-UNIT COST SEMANTICS - CRITICAL REFERENCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-All unit costs from cost_database.json follow strict inclusion/exclusion rules.
-**READ THIS BEFORE MODIFYING ANY COST CALCULATIONS** to prevent double-counting.
-
-STRUCTURE UNIT COSTS (concrete + formwork + placement ONLY):
-
-  • suspended_slab_8in_sf ($18.00/SF)
-    INCLUDES: Concrete, formwork, placement
-    EXCLUDES: Rebar (→ _calculate_rebar_by_component)
-              Post-tensioning cables (→ _calculate_post_tensioning)
-              Pumping (→ _calculate_concrete_pumping)
-
-  • columns_18x24_cy ($950.00/CY)
-    INCLUDES: Concrete, formwork, placement
-    EXCLUDES: Rebar (→ _calculate_rebar_by_component at 1320 lbs/CY)
-              Column accessories/stud rails (→ _calculate_structural_accessories)
-
-  • slab_on_grade_5in_sf ($6.00/SF)
-    INCLUDES: Concrete, placement
-    EXCLUDES: Under-slab gravel (→ _calculate_foundation)
-              Vapor barrier (→ _calculate_foundation)
-              Rebar (→ _calculate_foundation for SOG, none currently modeled)
-
-FOUNDATION UNIT COSTS (concrete + formwork + placement ONLY):
-
-  • footings_spot_cy ($650.00/CY)
-    INCLUDES: Concrete, formwork, placement
-    EXCLUDES: Rebar (→ _calculate_foundation at 110 lbs/CY per TechRidge)
-              Excavation (→ _calculate_foundation, separate line item)
-
-  • footings_continuous_cy ($650.00/CY)
-    INCLUDES: Concrete, formwork, placement
-    EXCLUDES: Rebar (→ _calculate_foundation at 110 lbs/CY per TechRidge)
-              Excavation (→ _calculate_foundation, separate line item)
-
-WALL/CORE UNIT COSTS (concrete + formwork ONLY):
-
-  • core_wall_12in_cost_per_sf ($28.50/SF)
-    INCLUDES: Concrete, formwork (both faces), placement
-    EXCLUDES: Rebar (→ _calculate_core_walls at 3.0-4.0 lbs/SF for walls)
-
-REBAR UNIT COSTS (material + labor):
-
-  • rebar_cost_per_lb ($1.25/LB)
-    All-in rate for rebar: material, cutting, bending, placement, ties, chairs
-
-POST-TENSIONING UNIT COSTS (material + labor):
-
-  • post_tension_cable_cost_per_lb ($1.10/LB)
-    All-in rate for PT: cables, anchors, stressing, grouting
-
-SEMANTIC MODEL SUMMARY:
-  ✓ Concrete rates = concrete + formwork + placement ONLY
-  ✓ Rebar ALWAYS calculated separately (never embedded in concrete rates)
-  ✓ PT cables ALWAYS calculated separately (never embedded in slab rates)
-  ✓ Pumping ALWAYS calculated separately (never embedded in concrete rates)
-  ✓ Each material appears in EXACTLY ONE cost calculation method
-
-This prevents ALL double-counting of materials/labor.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Calculates cost components and records every quantity + cost line in the
+normalized data tables.
 """
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
-from .garage import SplitLevelParkingGarage
+from typing import Any, Dict, Optional
+
+from .data_tables import DataTables
 
 
-class CostCalculator:
-    """
-    Calculate total construction cost based on garage geometry and unit costs
+class CostEngine:
+    def __init__(
+        self,
+        cost_database: Dict[str, Any],
+        store: DataTables,
+        project_id: str,
+        element_ids: Dict[str, str],
+    ):
+        self.cost_database = cost_database
+        self.store = store
+        self.project_id = project_id
+        self.element_ids = dict(element_ids)
 
-    Cost categories:
-    - Foundation (one-time, scales with footprint)
-    - Structure above grade (per floor)
-    - Structure below grade (per floor, with premium)
-    - Excavation (volume-based)
-    - MEP systems (area-based)
-    - Exterior (perimeter × height)
-    - Ramp system (fixed cost)
-    - Soft costs (percentage of hard costs)
-    """
+        self.store.ensure_unit_costs(cost_database)
 
-    def __init__(self, cost_database: Dict):
-        """Initialize with cost database"""
-        self.costs = cost_database['unit_costs']
-        self.component_costs = cost_database['component_specific_costs']
-        self.soft_costs_pct = cost_database['soft_costs_percentages']
+        self.costs = cost_database["unit_costs"]
+        self.component_costs = cost_database["component_specific_costs"]
+        self.soft_costs_pct = cost_database["soft_costs_percentages"]
+        self.diagnostics: Dict[str, Any] = {"warnings": [], "errors": []}
 
+        # Root element for uncategorized items
+        self._ensure_element("cost_summary", "cost_summary")
 
-    def calculate_all_costs(self, garage: SplitLevelParkingGarage, gc_params: dict = None) -> Dict:
-        """
-        Calculate complete cost breakdown for garage
+    # ------------------------------------------------------------------ public
+    def calculate(self, garage, gc_params: Dict[str, Any]) -> Dict[str, float]:
+        summary: Dict[str, float] = {}
 
-        Args:
-            garage: SplitLevelParkingGarage instance with geometry
-            gc_params: General Conditions calculation parameters (optional)
-                      {"method": "percentage", "value": 9.37} - GC as % of hard costs (default)
-                      {"method": "monthly_rate", "value": 5.0} - duration in months × monthly rate
+        summary["foundation"] = self._foundation_costs(garage)
+        summary["excavation"] = self._excavation_costs(garage)
+        summary["ramp_system"] = 0.0
+        summary["structure_above"] = self._structure_concrete_costs(garage)
+        summary["structure_below"] = 0.0
+        summary["concrete_pumping"] = self._concrete_pumping(garage)
+        summary["rebar"] = self._rebar_costs(garage)
+        summary["post_tensioning"] = self._post_tensioning_costs(garage)
+        summary["core_walls"] = self._core_wall_costs(garage)
+        summary["retaining_walls"] = self._retaining_wall_costs(garage)
+        summary["elevators"] = self._elevator_costs(garage)
+        summary["stairs"] = self._stair_costs(garage)
+        summary["structural_accessories"] = self._structural_accessories(garage)
+        summary["mep"] = self._mep_costs(garage)
+        summary["vdc_coordination"] = self._vdc_costs(garage)
+        summary["exterior"] = self._exterior_costs(garage)
+        summary["interior_finishes"] = 0.0
+        summary["special_systems"] = 0.0
+        summary["site_finishes"] = self._site_finishes_costs(garage)
 
-        Returns dict with:
-        - Individual cost categories
-        - Subtotals
-        - Total cost
-        - Cost per stall
-        - Cost per SF
-        """
-        costs = {}
+        hard_cost_keys = [
+            key
+            for key in summary
+            if key
+            not in {
+                "general_conditions",
+                "cm_fee",
+                "insurance",
+                "contingency",
+                "soft_cost_subtotal",
+                "total",
+                "cost_per_stall",
+                "cost_per_sf",
+                "hard_cost_subtotal",
+            }
+        ]
+        hard_cost_total = sum(summary[key] for key in hard_cost_keys)
+        summary["hard_cost_subtotal"] = hard_cost_total
 
-        # === ONE-TIME COSTS ===
-        costs['foundation'] = self._calculate_foundation(garage)
-        costs['excavation'] = self._calculate_excavation(garage)
-        # Ramp costs calculated from discrete components (walls, barriers, curbs)
-        costs['ramp_system'] = 0
+        summary["general_conditions"] = self._general_conditions(hard_cost_total, gc_params)
 
-        # === STRUCTURE COSTS ===
-        costs['structure_above'] = self._calculate_structure_above(garage)
-        costs['structure_below'] = self._calculate_structure_below(garage)
-
-        # === GRANULAR STRUCTURE COMPONENTS ===
-        costs['concrete_pumping'] = self._calculate_concrete_pumping(garage)
-        costs['rebar'] = self._calculate_rebar_by_component(garage)
-        costs['post_tensioning'] = self._calculate_post_tensioning(garage)
-        costs['core_walls'] = self._calculate_core_walls(garage)
-        costs['retaining_walls'] = self._calculate_retaining_walls(garage)
-
-        # === VERTICAL TRANSPORTATION ===
-        costs['elevators'] = self._calculate_elevators(garage)
-        costs['stairs'] = self._calculate_stairs(garage)
-
-        # === STRUCTURAL ACCESSORIES ===
-        costs['structural_accessories'] = self._calculate_structural_accessories(garage)
-
-        # === MEP SYSTEMS ===
-        costs['mep'] = self._calculate_mep(garage)
-
-        # === VDC COORDINATION ===
-        costs['vdc_coordination'] = self._calculate_vdc_coordination(garage)
-
-        # === EXTERIOR ===
-        costs['exterior'] = self._calculate_exterior(garage)
-
-        # === INTERIOR FINISHES ===
-        costs['interior_finishes'] = self._calculate_interior_finishes(garage)
-
-        # === SPECIAL SYSTEMS ===
-        costs['special_systems'] = self._calculate_special_systems(garage)
-
-        # === SITE/FINISHES ===
-        costs['site_finishes'] = self._calculate_site_finishes(garage)
-
-        # === HARD COST SUBTOTAL ===
-        hard_cost_total = sum(costs.values())
-        costs['hard_cost_subtotal'] = hard_cost_total
-
-        # === GENERAL CONDITIONS ===
-        costs['general_conditions'] = self._calculate_general_conditions(hard_cost_total, gc_params)
-
-        # === SOFT COSTS (as % of HARD COSTS + GENERAL CONDITIONS) ===
-        # CRITICAL: Soft costs apply to (hard costs + GC), not hard costs alone
-        # From TechRidge budget reverse calculation:
-        # Parking hard costs: $10,228,102
-        # Parking GC: $958,008
-        # Base for soft costs: $11,186,110
-        # Then: CM fee, insurance, contingencies applied to this base
-        soft_cost_base = hard_cost_total + costs['general_conditions']
-
-        costs['cm_fee'] = soft_cost_base * self.soft_costs_pct['cm_fee']
-        costs['insurance'] = soft_cost_base * self.soft_costs_pct['insurance']
-        costs['contingency'] = soft_cost_base * (
-            self.soft_costs_pct['contingency_cm'] + self.soft_costs_pct['contingency_design']
+        soft_base = hard_cost_total + summary["general_conditions"]
+        summary["cm_fee"] = soft_base * self.soft_costs_pct["cm_fee"]
+        summary["insurance"] = soft_base * self.soft_costs_pct["insurance"]
+        summary["contingency"] = soft_base * (
+            self.soft_costs_pct["contingency_cm"] + self.soft_costs_pct["contingency_design"]
         )
 
-        # === TOTAL COST ===
-        soft_cost_total = (costs['general_conditions'] + costs['cm_fee'] +
-                          costs['insurance'] + costs['contingency'])
-        costs['soft_cost_subtotal'] = soft_cost_total
-        costs['total'] = hard_cost_total + soft_cost_total
+        summary["soft_cost_subtotal"] = (
+            summary["general_conditions"]
+            + summary["cm_fee"]
+            + summary["insurance"]
+            + summary["contingency"]
+        )
+        summary["total"] = hard_cost_total + summary["soft_cost_subtotal"]
+        summary["cost_per_stall"] = summary["total"] / garage.total_stalls
+        summary["cost_per_sf"] = summary["total"] / garage.total_gsf
 
-        # === UNIT COSTS ===
-        costs['cost_per_stall'] = costs['total'] / garage.total_stalls
-        # Use total_gsf (sum of discrete level areas) instead of footprint for accuracy
-        # This accounts for half-levels being ~50% of footprint area
-        costs['cost_per_sf'] = costs['total'] / garage.total_gsf
+        self._record_soft_costs(summary, garage)
+        self._validate_cost_summary(summary)
 
-        return costs
+        return summary
 
-    def _calculate_foundation(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate foundation costs using discrete components
+    # ---------------------------------------------------------------- utilities
+    def _ensure_element(
+        self,
+        key: str,
+        element_type: str,
+        *,
+        name: Optional[str] = None,
+        parent: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if key in self.element_ids:
+            return self.element_ids[key]
+        parent_id = self.element_ids.get(parent) if parent else None
+        element_id = self.store.add_element(
+            self.project_id,
+            element_type,
+            name=name or key,
+            parent_element_id=parent_id,
+            metadata=metadata or {},
+        )
+        self.element_ids[key] = element_id
+        return element_id
 
-        COMPONENTS CALCULATED HERE:
-        • Slab on grade (5" thick concrete) - footprint area
-        • Under-slab vapor barrier
-        • Under-slab gravel (4" compacted)
-        • Subdrain system (drainage mat under entire slab)
-        • Footing drain (perimeter, if below-grade levels exist)
-        • Spread footings (concrete + rebar + excavation) - from FootingCalculator
-        • Continuous footings (concrete + rebar + excavation) - from FootingCalculator
-        • Retaining wall footings (concrete + rebar + excavation) - from FootingCalculator
+    def _add_cost_line(
+        self,
+        *,
+        element_key: str,
+        element_type: str,
+        parent: Optional[str],
+        measure: str,
+        quantity: float,
+        unit: str,
+        unit_cost_key: str,
+        unit_cost_value: float,
+        category: str,
+        description: str,
+        source_pass: str,
+        notes: Optional[str] = None,
+    ) -> float:
+        if quantity <= 0:
+            return 0.0
 
-        CRITICAL: ALL footing rebar is calculated in THIS method using discrete quantities
-        from FootingCalculator. Do NOT calculate footing rebar in _calculate_rebar_by_component()
-        to avoid double-counting.
+        element_id = self._ensure_element(element_key, element_type, parent=parent)
+        quantity_id = self.store.add_quantity(
+            self.project_id,
+            element_id,
+            measure,
+            quantity,
+            unit,
+            source_pass=source_pass,
+            notes=notes,
+        )
+        self.store.add_cost_item(
+            self.project_id,
+            quantity_id=quantity_id,
+            element_id=element_id,
+            unit_cost_key=unit_cost_key,
+            category=category,
+            description=description,
+            unit=unit,
+            quantity=quantity,
+            unit_cost=unit_cost_value,
+            source_pass=source_pass,
+            notes=notes,
+        )
+        return unit_cost_value * quantity
 
-        CALCULATED ELSEWHERE (not here):
-        • Suspended slab rebar → _calculate_rebar_by_component()
-        • Column rebar → _calculate_rebar_by_component()
-        • Wall rebar → _calculate_core_walls()
-        """
-        cost = 0
+    def _lookup(self, *path: str) -> float:
+        node = self.cost_database
+        for part in path:
+            if part not in node:
+                raise KeyError(f"Cost path {'/'.join(path)} not found")
+            node = node[part]
+        if isinstance(node, dict):
+            raise ValueError(f"Cost path {'/'.join(path)} is not numeric")
+        return float(node)
 
-        # Slab on grade (5" thick)
-        # SOG = full footprint (bottom 2 half-levels on shaped dirt)
-        sog_sf = garage.sog_levels_sf
-        sog_cost_per_sf = self.costs['structure']['slab_on_grade_5in_sf']
-        cost += sog_sf * sog_cost_per_sf
+    def _warn(self, message: str, detail: Optional[Dict[str, Any]] = None) -> None:
+        self.diagnostics["warnings"].append({"message": message, "detail": detail or {}})
 
-        # Under-slab vapor barrier
-        vapor_barrier_cost_per_sf = self.costs['structure']['vapor_barrier_sf']
-        cost += sog_sf * vapor_barrier_cost_per_sf
+    # ------------------------------------------------------------- cost helpers
+    def _foundation_costs(self, garage) -> float:
+        total = 0.0
+        foundation_key = "foundation"
+        self._ensure_element(foundation_key, "foundation_system")
 
-        # Under-slab gravel (4" compacted)
-        gravel_cost_per_sf = self.costs['structure']['under_slab_gravel_sf']
-        cost += sog_sf * gravel_cost_per_sf
+        sog_area = garage.sog_levels_sf
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:sog",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="slab_on_grade_area",
+            quantity=sog_area,
+            unit="SF",
+            unit_cost_key="structure.slab_on_grade_5in_sf",
+            unit_cost_value=self.costs["structure"]["slab_on_grade_5in_sf"],
+            category="foundation",
+            description="Slab on Grade (5 in)",
+            source_pass="foundation",
+            notes="Concrete + placement",
+        )
 
-        # Sub-drain system (drainage layer/mat under entire slab)
-        subdrain_cost_per_sf = self.costs['foundation']['subdrain_system_sf']
-        cost += garage.footprint_sf * subdrain_cost_per_sf
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:vapor_barrier",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="vapor_barrier_area",
+            quantity=sog_area,
+            unit="SF",
+            unit_cost_key="structure.vapor_barrier_sf",
+            unit_cost_value=self.costs["structure"]["vapor_barrier_sf"],
+            category="foundation",
+            description="Under-slab Vapor Barrier",
+            source_pass="foundation",
+        )
 
-        # Footing drain (perimeter drainage - only if below-grade construction)
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:under_slab_gravel",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="under_slab_gravel_area",
+            quantity=sog_area,
+            unit="SF",
+            unit_cost_key="structure.under_slab_gravel_sf",
+            unit_cost_value=self.costs["structure"]["under_slab_gravel_sf"],
+            category="foundation",
+            description="Under-slab Gravel (4 in)",
+            source_pass="foundation",
+        )
+
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:subdrain",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="subdrain_area",
+            quantity=garage.footprint_sf,
+            unit="SF",
+            unit_cost_key="foundation.subdrain_system_sf",
+            unit_cost_value=self.costs["foundation"]["subdrain_system_sf"],
+            category="foundation",
+            description="Subdrain System",
+            source_pass="foundation",
+        )
+
         if garage.half_levels_below > 0:
-            perimeter_lf = 2 * (garage.width + garage.length)
-            footing_drain_cost = perimeter_lf * self.costs['foundation']['footing_drain_lf']
-            cost += footing_drain_cost
-
-        # Footings - Discrete calculation from FootingCalculator
-        # Uses actual footing quantities calculated in geometry._calculate_footings()
-        # Includes: spread footings, continuous footings, retaining wall footings
-
-        # Spread footings (under columns)
-        spread_concrete_cost = (garage.spread_footing_concrete_cy *
-                               self.costs['foundation']['footings_spot_cy'])
-        spread_rebar_cost = (garage.spread_footing_rebar_lbs *
-                            self.costs['foundation']['rebar_footings_lbs'])
-        spread_excavation_cost = (garage.spread_footing_excavation_cy *
-                                 self.costs['foundation']['excavation_footings_cy'])
-
-        # Continuous footings (under core walls)
-        continuous_concrete_cost = (garage.continuous_footing_concrete_cy *
-                                   self.costs['foundation']['footings_continuous_cy'])
-        continuous_rebar_cost = (garage.continuous_footing_rebar_lbs *
-                                self.costs['foundation']['rebar_footings_lbs'])
-        continuous_excavation_cost = (garage.continuous_footing_excavation_cy *
-                                     self.costs['foundation']['excavation_footings_cy'])
-
-        # Retaining wall footings (if below-grade levels exist)
-        retaining_concrete_cost = (garage.retaining_wall_footing_concrete_cy *
-                                  self.costs['foundation']['footings_continuous_cy'])
-        retaining_rebar_cost = (garage.retaining_wall_footing_rebar_lbs *
-                               self.costs['foundation']['rebar_footings_lbs'])
-        retaining_excavation_cost = (garage.retaining_wall_footing_excavation_cy *
-                                    self.costs['foundation']['excavation_footings_cy'])
-
-        # Total footing costs
-        footing_cost = (
-            spread_concrete_cost + spread_rebar_cost + spread_excavation_cost +
-            continuous_concrete_cost + continuous_rebar_cost + continuous_excavation_cost +
-            retaining_concrete_cost + retaining_rebar_cost + retaining_excavation_cost
-        )
-
-        cost += footing_cost
-
-        # Backfill (foundation + ramp)
-        # Foundation backfill: around footings after concrete placement
-        # Ramp backfill: entry ramp on compacted earth (not suspended)
-        if hasattr(garage, 'backfill_foundation_cy'):
-            backfill_foundation_cost = (garage.backfill_foundation_cy *
-                                       self.costs['foundation']['backfill_cy'])
-            cost += backfill_foundation_cost
-
-        if hasattr(garage, 'backfill_ramp_cy'):
-            backfill_ramp_cost = (garage.backfill_ramp_cy *
-                                 self.costs['foundation']['backfill_cy'])
-            cost += backfill_ramp_cost
-
-        return cost
-
-    def _calculate_excavation(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate excavation costs (for below-grade construction)
-
-        Includes:
-        - Mass excavation
-        - Export/haul-off
-        - Structural fill import
-        - Over-excavation
-        - Retaining walls
-        - Waterproofing
-        - Under-slab drainage
-        """
-        if garage.half_levels_below == 0:
-            return 0
-
-        cost = 0
-
-        # Excavation and export
-        cost += garage.excavation_cy * self.costs['below_grade_premiums']['mass_excavation_3_5ft_cy']
-        cost += garage.export_cy * self.costs['foundation']['export_excess_cy']
-
-        # Structural fill
-        cost += garage.structural_fill_cy * self.costs['below_grade_premiums']['import_structural_fill_cy']
-
-        # Retaining walls
-        cost += garage.retaining_wall_sf * self.costs['below_grade_premiums']['retaining_wall_cw12_sf']
-
-        # Waterproofing (perimeter walls)
-        cost += garage.retaining_wall_sf * self.costs['foundation']['dampproofing_sf']
-
-        # Under-slab drainage
-        cost += garage.footprint_sf * self.costs['below_grade_premiums']['under_slab_drainage_sf']
-
-        # Elevator pit waterproofing (1 elevator for parking garage)
-        if hasattr(garage, 'elevator_pit_waterproofing_sf'):
-            cost += (garage.elevator_pit_waterproofing_sf *
-                     self.costs['below_grade_premiums']['waterproofing_elevator_pit_sf'])
-
-        return cost
-
-    def _calculate_structure_above(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate ALL structure costs (both above and below grade) using discrete components
-
-        ARCHITECTURAL FACT: Below-grade levels have the SAME geometry as above-grade:
-        • Split-level system: Half-levels with ~50% footprint (helical ramp geometry continues)
-        • Single-ramp system: Full floors at 100% footprint (ramp continues)
-
-        The geometry module's DiscreteLevelCalculator already calculates total quantities
-        for ALL levels (above + below grade) with correct geometry.
-
-        THIS METHOD CALCULATES:
-        • Suspended PT slabs: Concrete + formwork + placement ($18/SF for ALL levels)
-          Uses garage.suspended_levels_sf (includes both above and below grade)
-        • Columns: Concrete + formwork + placement ($950/CY for ALL levels)
-          Uses garage.concrete_columns_cy (includes both above and below grade)
-
-        IMPORTANT: Unit costs are for concrete + formwork + placement ONLY.
-        Other components calculated separately (to avoid double-counting):
-        • Rebar → _calculate_rebar_by_component()
-        • Post-tension cables → _calculate_post_tensioning()
-        • Core walls (12" concrete) → _calculate_core_walls()
-        • Concrete pumping → _calculate_concrete_pumping()
-
-        ADDITIONAL BELOW-GRADE COSTS (calculated elsewhere):
-        • Retaining walls → _calculate_excavation()
-        • Waterproofing → _calculate_excavation()
-        • Excavation/fill → _calculate_excavation()
-        """
-        # Suspended PT slabs (8" thick) - ALL levels
-        # garage.suspended_levels_sf already includes correct geometry for all levels
-        slab_cost_per_sf = self.costs['structure']['suspended_slab_8in_sf']  # $18/SF
-        total_slab_cost = garage.suspended_levels_sf * slab_cost_per_sf
-
-        # Columns (18" × 24" @ 31' grid) - ALL levels
-        # garage.concrete_columns_cy already includes columns for all levels
-        column_cost_per_cy = self.costs['structure']['columns_18x24_cy']  # $950/CY
-        total_column_cost = garage.concrete_columns_cy * column_cost_per_cy
-
-        return total_slab_cost + total_column_cost
-
-    def _calculate_structure_below(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        DEPRECATED: Below-grade structure now calculated in _calculate_structure_above()
-
-        Since we use the same rates ($18/SF slabs, $950/CY columns) for both above
-        and below grade, and the geometry properties already include all levels,
-        there's no reason to split this calculation.
-
-        Returns 0 to maintain interface compatibility.
-        """
-        return 0
-
-    def _calculate_mep(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate MEP systems cost
-
-        Broken out by system per TechRidge budget:
-        - Fire protection: $3.00/SF (sprinklers, standpipes, fire alarm)
-        - Plumbing: $1.50/SF (hose bibs, floor drains, domestic water)
-        - HVAC: $2.25/SF (ventilation - fans, ductwork, CO monitoring)
-        - Electrical: $3.25/SF (lighting, power, EV charging rough-in)
-        Total: $10.00/SF
-
-        Uses discrete level GSF sum - NOT net area or footprint × levels
-        """
-        # Total parking area = sum of all discrete level GSF from geometry engine
-        # Each level (P0.5, P1, P1.5, etc.) has individually calculated GSF
-        # Half-levels ≈ 50% footprint, entry/top levels have reductions
-        # This ensures MEP costs scale correctly with actual built area
-        total_parking_sf = garage.total_gsf
-
-        # Break out by system (updated from $7/SF blanket to $10/SF itemized)
-        cost = 0
-        cost += total_parking_sf * self.costs['mep']['fire_protection_parking_sf']  # $3.00/SF
-        cost += total_parking_sf * self.costs['mep']['plumbing_parking_sf']  # $1.50/SF
-        cost += total_parking_sf * self.costs['mep']['hvac_parking_sf']  # $2.25/SF
-        cost += total_parking_sf * self.costs['mep']['electrical_parking_sf']  # $3.25/SF
-
-        return cost
-
-    def _calculate_vdc_coordination(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate VDC (Virtual Design & Construction) coordination costs
-
-        VDC includes:
-        - BIM model coordination across all trades
-        - Clash detection and resolution
-        - Shop drawing review
-        - As-built documentation
-
-        From TechRidge: ~$212K VDC for 127K SF = $0.17/SF blended rate
-        Scales with building size as coordination effort increases with complexity
-        """
-        return garage.total_gsf * self.component_costs['vdc_coordination_per_sf_building']
-
-    def _calculate_exterior(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate exterior wall/screening costs using discrete components
-
-        Includes:
-        - Brake metal parking screen on perimeter
-        - High-speed overhead door (main entry gate)
-        """
-        # Exterior surface area (perimeter × height)
-        exterior_sf = garage.exterior_wall_sf
-
-        # Parking screen unit cost ($82/SF from cost database)
-        screen_cost_per_sf = self.costs['exterior']['parking_screen_sf']
-        cost = exterior_sf * screen_cost_per_sf
-
-        # High-speed overhead door at main entry (1 EA per garage)
-        if hasattr(garage, 'high_speed_overhead_door_ea'):
-            cost += garage.high_speed_overhead_door_ea * self.costs['site']['high_speed_overhead_door_ea']
-
-        return cost
-
-    def _calculate_site_finishes(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate site finishes cost
-
-        Includes:
-        - Sealed concrete floors (epoxy/urethane sealer)
-        - Pavement markings (striping, stall numbers, directional arrows)
-        - Signage (wayfinding, ADA compliance)
-        - Post-construction cleaning
-        - Site utilities (oil/water separator, storm drains)
-
-        Uses discrete level GSF sum - NOT net area or footprint × levels
-        """
-        cost = 0
-
-        # Total parking floor area = sum of all discrete level GSF from geometry engine
-        # Sealing and striping applied to all parking surfaces across all levels
-        total_parking_sf = garage.total_gsf
-
-        # Sealed concrete
-        cost += total_parking_sf * self.costs['site']['sealed_concrete_parking_sf']
-
-        # Pavement markings (per stall)
-        cost += garage.total_stalls * self.costs['site']['pavement_markings_per_stall']
-
-        # Final cleaning
-        cost += total_parking_sf * self.costs['site']['final_cleaning_parking_sf']
-
-        # Site utilities (oil/water separator, storm drains)
-        if hasattr(garage, 'oil_water_separator_ea'):
-            cost += garage.oil_water_separator_ea * self.costs['site']['oil_water_separator_ea']
-
-        if hasattr(garage, 'storm_drain_48in_ads_ea'):
-            cost += garage.storm_drain_48in_ads_ea * self.costs['site']['storm_drain_48in_ads_ea']
-
-        if hasattr(garage, 'storm_drain_junction_box_6x6_ea'):
-            cost += garage.storm_drain_junction_box_6x6_ea * self.costs['site']['storm_drain_junction_box_6x6_ea']
-
-        return cost
-
-    def _calculate_concrete_pumping(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate concrete pumping costs
-
-        Based on total concrete volume
-        """
-        total_concrete_cy = garage.total_concrete_cy
-        cost_per_cy = self.component_costs['concrete_pumping_per_cy']
-
-        return total_concrete_cy * cost_per_cy
-
-    def _calculate_rebar_by_component(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate rebar costs by component (columns, slabs)
-
-        IMPORTANT COST SEMANTICS:
-        - Footing rebar is NOT calculated here - it's handled in _calculate_foundation()
-          using discrete footing quantities from FootingCalculator
-        - Wall/core rebar is calculated in _calculate_core_walls()
-        - This method only calculates: Column rebar + PT slab rebar
-
-        Uses component-specific quantities from budget
-        """
-        cost = 0
-        cost_per_lb = self.component_costs['rebar_cost_per_lb']
-
-        # FOOTING REBAR: NOT calculated here to prevent double-counting
-        # Footing rebar is calculated in _calculate_foundation() using discrete quantities:
-        #   - garage.spread_footing_rebar_lbs (from FootingCalculator)
-        #   - garage.continuous_footing_rebar_lbs (from FootingCalculator)
-        #   - garage.retaining_wall_footing_rebar_lbs (from FootingCalculator)
-        # DO NOT add footing calculations here.
-
-        # Column rebar (lbs per CY of column concrete)
-        column_rebar_lbs = garage.concrete_columns_cy * self.component_costs['rebar_columns_lbs_per_cy_concrete']
-        cost += column_rebar_lbs * cost_per_lb
-
-        # PT slab rebar (lbs per SF of slab)
-        slab_rebar_lbs = garage.total_slab_sf * self.component_costs['rebar_pt_slab_lbs_per_sf']
-        cost += slab_rebar_lbs * cost_per_lb
-
-        # NOTE: Center core wall and curb rebar calculated in _calculate_core_walls()
-        # Split-level uses 12" solid core walls, single-ramp has no center elements
-
-        return cost
-
-    def _calculate_post_tensioning(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate post-tensioning cable costs
-
-        Based on SF of suspended slabs (not SOG)
-        """
-        # Only suspended slabs get PT (not foundation SOG)
-        suspended_slab_sf = garage.total_slab_sf
-
-        # PT cable quantity (lbs per SF)
-        pt_lbs_per_sf = self.component_costs['post_tension_cables_lbs_per_sf_8in']
-        total_pt_lbs = suspended_slab_sf * pt_lbs_per_sf
-
-        # Cost
-        cost_per_lb = self.component_costs['post_tension_cable_cost_per_lb']
-
-        return total_pt_lbs * cost_per_lb
-
-    def _calculate_core_walls(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate all wall costs using discrete component takeoffs
-
-        Wall types vary by ramp system:
-
-        SPLIT-LEVEL DOUBLE-RAMP (2-bay):
-        - CENTER CORE WALL (12" concrete) - traffic separation & structural support
-        - CENTER CURBS (12" × 8" wheel stops) - protect core wall
-        - BAY CAP BARRIER (36" × 6" concrete) - top level ramp termination
-
-        SPLIT-LEVEL DOUBLE-RAMP (3+ bay):
-        - RAMP EDGE BARRIERS (36" × 6" concrete) - at ramp/parking interfaces, full height
-        - NO core wall or curbs (ramps separated by parking bays)
-
-        SINGLE-RAMP FULL-FLOOR (2-bay):
-        - NO ramp barriers (relies on existing structures)
-
-        SINGLE-RAMP FULL-FLOOR (3+ bay):
-        - RAMP BARRIERS (36" × 6" concrete) - both sides of center ramp bay, full height
-
-        BOTH SYSTEMS:
-        - Elevator shaft (12" concrete)
-        - Stair enclosures (12" concrete)
-        - Utility closet (12" concrete)
-        - Storage closet (12" concrete)
-        - Top-level perimeter barrier (36" concrete) - standalone garages only
-        - Elevator pit (8" CMU) - below grade only
-
-        Returns total wall cost
-        """
-        cost = 0
-
-        # === SYSTEM-SPECIFIC CENTER ELEMENTS ===
-        from .geometry.design_modes import RampSystemType
-
-        # Validate ramp system type
-        if not isinstance(garage.ramp_system, RampSystemType):
-            raise TypeError(
-                f"garage.ramp_system must be RampSystemType enum, got {type(garage.ramp_system).__name__}"
+            perimeter = 2 * (garage.width + garage.length)
+            total += self._add_cost_line(
+                element_key=f"{foundation_key}:footing_drain",
+                element_type="foundation_component",
+                parent=foundation_key,
+                measure="footing_drain_length",
+                quantity=perimeter,
+                unit="LF",
+                unit_cost_key="foundation.footing_drain_lf",
+                unit_cost_value=self.costs["foundation"]["footing_drain_lf"],
+                category="foundation",
+                description="Footing Drain",
+                source_pass="foundation",
             )
 
-        if garage.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE:
-            cost += self._calculate_split_level_center_costs(garage)
-        elif garage.ramp_system == RampSystemType.SINGLE_RAMP_FULL:
-            cost += self._calculate_single_ramp_barrier_costs(garage)
-        else:
-            raise ValueError(f"Unknown ramp system type: {garage.ramp_system}")
-
-        # === PERIMETER BARRIERS (BOTH SYSTEMS) ===
-        cost += self._calculate_perimeter_barrier_costs(garage)
-
-        # === CORE STRUCTURES (BOTH SYSTEMS) ===
-        cost += self._calculate_core_structure_costs(garage)
-
-        return cost
-
-    def _calculate_split_level_center_costs(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate center element costs for split-level double-ramp system
-
-        2-bay configuration:
-        - 12" concrete core wall (full height)
-        - 8" × 12" curbs (both sides, all levels)
-        - Bay cap barrier (36" × 6", top level only, spans building width)
-
-        3+ bay configuration:
-        - NO core wall or curbs
-        - Ramp edge barriers (36" × 6", full height, at ramp/parking interfaces)
-
-        Returns: Total cost for split-level center elements
-        """
-        cost = 0
-        rebar_cost_per_lb = self.component_costs['rebar_cost_per_lb']
-
-        # === CENTER CORE WALL ===
-        # 12" thick concrete wall, full height
-        # Cost at $28.50/SF (formed concrete wall rate from budget)
-        core_wall_sf = garage.center_core_wall_sf
-        core_wall_cost_per_sf = self.component_costs['core_wall_12in_cost_per_sf']  # $28.50/SF
-        cost += core_wall_sf * core_wall_cost_per_sf
-
-        # Core wall rebar (structural - use wall rebar rate)
-        # Budget shows 3.0 lbs/SF for walls (conservative for 12" wall)
-        core_wall_rebar_lbs = core_wall_sf * 3.0  # lbs/SF for walls
-        cost += core_wall_rebar_lbs * rebar_cost_per_lb
-
-        # === CENTER CURBS ===
-        # 8" × 12" concrete curbs at base of core wall
-        # Cost like foundation slabs (simpler forming than structural walls)
-        curb_concrete_cy = garage.center_curb_concrete_cy
-        curb_cost_per_cy = self.component_costs['curb_8x12_cy']  # $650/CY (placeholder)
-        cost += curb_concrete_cy * curb_cost_per_cy
-
-        # Curb rebar (minimal - just reinforcement, not structural)
-        curb_rebar_lbs = garage.center_curb_sf * 0.5  # Reduced rate for curbs
-        cost += curb_rebar_lbs * rebar_cost_per_lb
-
-        return cost
-
-    def _calculate_single_ramp_barrier_costs(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate ramp barrier costs for single-ramp full-floor system
-
-        Ramp barriers (3+ bay only):
-        - 36" tall × 6" thick concrete barriers
-        - Located at both edges of ramp bay
-        - Full building height (all floors)
-        - Replaces center columns + beams + curbs from split-level
-
-        2-bay single-ramp has NO barriers (relies on existing structures)
-
-        Uses same cost rate as formed concrete walls: $28.50/SF
-        Rebar: 4.0 lbs/SF (standard wall rate from cost database)
-
-        Returns: Total cost for ramp barriers
-        """
-        cost = 0
-        rebar_cost_per_lb = self.component_costs['rebar_cost_per_lb']
-
-        # === RAMP BARRIERS ===
-        # 36" × 6" concrete barriers at ramp bay edges
-        # Cost at $28.50/SF (same as formed concrete walls)
-        barrier_sf = garage.ramp_barrier_sf
-        barrier_cost_per_sf = self.component_costs['core_wall_12in_cost_per_sf']  # $28.50/SF
-        cost += barrier_sf * barrier_cost_per_sf
-
-        # Rebar (4.0 lbs/SF - standard wall rate from cost database)
-        # Note: garage.py already calculates ramp_barrier_rebar_lbs
-        barrier_rebar_lbs = garage.ramp_barrier_rebar_lbs
-        cost += barrier_rebar_lbs * rebar_cost_per_lb
-
-        return cost
-
-    def _calculate_perimeter_barrier_costs(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate perimeter barrier costs (used by both ramp systems)
-
-        36" (3 ft) concrete walls around perimeter of all levels above entry
-
-        Returns: Total cost for perimeter barriers
-        """
-        cost = 0
-        rebar_cost_per_lb = self.component_costs['rebar_cost_per_lb']
-
-        # === PERIMETER BARRIERS ===
-        # 36" (3 ft) concrete walls around perimeter of all levels
-        # Cost at $28.50/SF (same as formed concrete walls)
-        barrier_sf = garage.perimeter_barrier_sf
-        barrier_cost_per_sf = self.component_costs['core_wall_12in_cost_per_sf']
-        cost += barrier_sf * barrier_cost_per_sf
-
-        # Barrier rebar (similar to walls - 3.0 lbs/SF)
-        barrier_rebar_lbs = barrier_sf * 3.0  # lbs/SF for barriers
-        cost += barrier_rebar_lbs * rebar_cost_per_lb
-
-        return cost
-
-    def _calculate_core_structure_costs(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate core structure costs (used by both ramp systems)
-
-        Includes:
-        - Elevator shaft (12" concrete)
-        - Stair enclosures (12" concrete)
-        - Utility closet (NW corner, 20'×19', 12" concrete)
-        - Storage closet (SW corner, 29'×18', 12" concrete)
-        - Top-level perimeter barrier (3' tall, 12" concrete, categorized as shearwall)
-        - Elevator pit (8" CMU) - below grade only
-
-        Returns: Total cost for core structures
-        """
-        cost = 0
-        rebar_cost_per_lb = self.component_costs['rebar_cost_per_lb']
-
-        # === ELEVATOR & STAIR WALLS ===
-        # Elevator shaft - 12" concrete
-        elevator_shaft_sf = garage.elevator_shaft_sf
-        cost += elevator_shaft_sf * self.component_costs['core_wall_12in_cost_per_sf']
-
-        # Stair enclosures - 12" concrete
-        stair_enclosure_sf = garage.stair_enclosure_sf
-        cost += stair_enclosure_sf * self.component_costs['core_wall_12in_cost_per_sf']
-
-        # === UTILITY & STORAGE CLOSET WALLS ===
-        # Utility closet (NW corner) - 12" concrete, 20'×19'
-        utility_closet_sf = garage.utility_closet_sf
-        cost += utility_closet_sf * self.component_costs['core_wall_12in_cost_per_sf']
-
-        # Storage closet (SW corner) - 12" concrete, 29'×18'
-        storage_closet_sf = garage.storage_closet_sf
-        cost += storage_closet_sf * self.component_costs['core_wall_12in_cost_per_sf']
-
-        # === TOP-LEVEL PERIMETER BARRIER (12" SHEARWALL CATEGORY) ===
-        # 3' tall concrete barrier around perimeter of top level
-        # Categorized with 12" shearwalls (not parking barriers) per TechRidge budget
-        # Both faces counted for forming cost
-        top_barrier_sf = garage.top_level_barrier_12in_sf
-        cost += top_barrier_sf * self.component_costs['core_wall_12in_cost_per_sf']
-
-        # Rebar for top barrier (4.0 lbs/SF - same as walls)
-        top_barrier_rebar_lbs = top_barrier_sf * 4.0
-        cost += top_barrier_rebar_lbs * rebar_cost_per_lb
-
-        # Elevator pit - 8" CMU (always - standard construction practice)
-        # CMU pit below concrete shaft (cheaper and easier than formed concrete)
-        elevator_pit_cmu_sf = garage.elevator_pit_cmu_sf
-        # Use masonry_wall cost from unit_costs
-        cost += elevator_pit_cmu_sf * self.costs['structure']['masonry_wall_8in_sf']
-
-        return cost
-
-    def _calculate_retaining_walls(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate retaining wall costs for below-grade perimeter
-
-        Already included in excavation costs, so return 0 to avoid double-counting
-        """
-        # This is already accounted for in _calculate_excavation()
-        # Returning 0 to avoid double-counting
-        return 0
-
-    def _calculate_elevators(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate elevator costs based on number of stops
-
-        Includes:
-        - Base elevator cost per stop
-        - Elevator accessories (sump pits, ladders, upgrades, permits, warranties)
-
-        Note: Current design assumes 1 elevator per building (standard for parking structures)
-        """
-        num_stops = garage.num_elevator_stops
-        num_elevators = 1  # Fixed: 1 elevator per building in current design
-
-        # Base elevator cost
-        cost = num_stops * self.component_costs['elevator_cost_per_stop']
-
-        # Elevator accessories (per elevator)
-        cost += num_elevators * self.component_costs['elevator_sump_pit_ea']
-        cost += num_elevators * self.component_costs['elevator_pit_ladder_ea']
-        cost += num_elevators * self.component_costs['elevator_cab_upgrade_ea']
-        cost += num_elevators * self.component_costs['elevator_construction_permit_ea']
-        cost += num_elevators * self.component_costs['elevator_warranty_extension_ea']
-        cost += num_elevators * self.component_costs['elevator_cab_protection_ea']
-        cost += num_elevators * self.component_costs['elevator_cab_refurbish_ea']
-
-        return cost
-
-    def _calculate_stairs(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate stair costs based on number of flights
-
-        Includes:
-        - Metal stair pan with concrete infill ($10,400/flight)
-        - Guardrails and handrails ($3,150/flight)
-        """
-        num_flights = garage.num_stair_flights
-
-        # Metal stair pan cost
-        cost = num_flights * self.component_costs['stair_flight_cost']
-
-        # Guardrails and handrails (separate line item in TR budget)
-        cost += num_flights * self.component_costs['stair_railing_per_flight']
-
-        return cost
-
-    def _calculate_structural_accessories(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate structural accessories and miscellaneous items
-
-        Includes:
-        - Stud rails (elevated deck anchors, 12 per column)
-        - Expansion joints (seismic/thermal movement)
-        - Embeds and anchor bolts (connections)
-        - Miscellaneous metals (railings, supports, misc fabrications)
-        - Beam allowance (complex situations, atypical spans)
-        """
-        cost = 0
-
-        # Stud rails - post-tensioned slab anchors, 12 per column
-        num_studs = garage.num_columns * self.component_costs['studs_per_column_count']
-        cost += num_studs * self.component_costs['stud_rails_per_column']
-
-        # Expansion joints - seismic/thermal movement control
-        # From TechRidge: 678 LF for 126'×210' building perimeter = 672 LF
-        # Expansion joints run approximately 1× building perimeter
-        perimeter_lf = 2 * (garage.width + garage.length)
-        expansion_joint_lf = perimeter_lf
-        cost += expansion_joint_lf * self.component_costs['expansion_joint_cost_per_lf']
-
-        # Embeds and anchor bolts - connections in suspended slabs
-        embeds_cost = garage.suspended_slab_sf * self.component_costs['embeds_anchor_bolts_per_sf_suspended']
-        cost += embeds_cost
-
-        # Miscellaneous metals - railings, supports, misc fabrications
-        misc_metals_lbs = garage.total_gsf * self.component_costs['misc_metals_lbs_per_sf_building']
-        misc_metals_tons = misc_metals_lbs / 2000
-        cost += misc_metals_tons * self.component_costs['misc_metals_cost_per_ton']
-
-        # Beam allowance - complex situations, atypical spans
-        # From TechRidge: $200K / 127K SF = $1.57/SF
-        # Scales with building size independent of material costs
-        cost += garage.total_gsf * self.component_costs['beam_allowance_per_sf_building']
-
-        return cost
-
-    def _calculate_interior_finishes(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate interior finishes for parking garage
-
-        Includes:
-        - Wall/ceiling painting (cores, stairs, lobbies)
-        - Commercial doors with hardware (stairs, elevators, utility rooms)
-        - Door frame painting
-        NOTE: Sealed concrete and final cleaning are owned by Site Finishes to avoid double-counting.
-        """
-        cost = 0
-
-        # Wall/ceiling painting - cores, stairs, elevator lobbies
-        # Temporary proxy: $0.42/SF of building GSF (will be replaced with actual wall area calculation)
-        cost += garage.total_gsf * self.component_costs['painting_walls_ceilings_per_sf_building']
-
-        # Commercial doors - estimate based on building size and access points
-        # Rule of thumb: 2 stair doors per level + 2 elevator doors per level + utility/storage access
-        num_levels = garage.total_levels
-        num_elevators = 1  # Fixed: 1 elevator per building in current design
-        num_single_doors = (garage.num_stairs * 2 * num_levels +  # Stair doors (entry/exit each stair)
-                           num_elevators * 2 * num_levels +  # Elevator lobby doors
-                           4)  # Utility/storage/mechanical room doors
-        cost += num_single_doors * self.component_costs['commercial_door_single_ea']
-
-        # Door frame painting
-        cost += num_single_doors * self.component_costs['door_frame_painting_ea']
-
-        return cost
-
-    def _calculate_special_systems(self, garage: SplitLevelParkingGarage) -> float:
-        """
-        Calculate special systems and equipment
-
-        Includes:
-        - Fire extinguishers with cabinets (code required)
-        - Knox box (fire department access)
-        - Bicycle racks (amenity)
-        NOTE: Pavement markings are owned by Site Finishes to avoid double-counting.
-        """
-        cost = 0
-
-        # Fire extinguishers - code required spacing (typically 75' travel distance max)
-        # Rule of thumb: 1 per 5,000 SF building area, minimum 1 per floor
-        num_extinguishers = max(num_levels := garage.total_levels,
-                               int(garage.total_gsf / 5000))
-        cost += num_extinguishers * self.component_costs['fire_extinguisher_with_cabinet_ea']
-
-        # Knox box - fire department rapid entry (2 locations typical)
-        cost += 2 * self.component_costs['knox_box_ea']
-
-        # Bicycle racks (1 per 4 stalls from TR)
-        if hasattr(garage, 'bicycle_rack_ea'):
-            cost += garage.bicycle_rack_ea * self.costs['site']['bicycle_rack_ea']
-
-        return cost
-
-    def _calculate_general_conditions(self, hard_cost_total: float, gc_params: dict = None) -> float:
-        """
-        Calculate general conditions using user-selected method
-
-        Method 1 (DEFAULT): Percentage of hard costs
-        - From TechRidge budget: $958,008 GC / $10,228,102 hard costs = 9.37%
-        - Better for parametric scaling to different project sizes
-
-        Method 2: Monthly rate × duration
-        - From budget: $191,008/month (derived from $958,008 / 5 months)
-        - Requires user-estimated duration (not CPM schedule)
-
-        Args:
-            hard_cost_total: Sum of all hard costs before GC
-            gc_params: {"method": "percentage", "value": 9.37} or
-                      {"method": "monthly_rate", "value": 5.0}
-
-        Returns:
-            General conditions cost
-        """
-        # Default to percentage method if not specified
-        if gc_params is None:
-            gc_params = {"method": "percentage", "value": 9.37}
-
-        if gc_params["method"] == "percentage":
-            # Percentage of hard costs (better for scaling)
-            gc_percentage = gc_params["value"] / 100  # Convert % to decimal
-            return hard_cost_total * gc_percentage
-
-        elif gc_params["method"] == "monthly_rate":
-            # Duration × monthly rate
-            estimated_duration_months = max(3.0, gc_params["value"])  # Minimum 3 months
-            cost_per_month = self.component_costs['general_conditions_per_month']
-            return estimated_duration_months * cost_per_month
-
-        else:
-            raise ValueError(f"Unknown GC method: {gc_params['method']}")
-
-    def get_cost_breakdown_table(self, garage: SplitLevelParkingGarage) -> Dict:
-        """
-        Return formatted cost breakdown for display
-
-        Returns dict organized by category with subtotals
-        """
-        costs = self.calculate_all_costs(garage)
-
-        breakdown = {
-            'Hard Costs': {
-                'Foundation': costs['foundation'],
-                'Excavation & Site Prep': costs['excavation'],
-                'Structure (Above Grade)': costs['structure_above'],
-                'Structure (Below Grade)': costs['structure_below'],
-                'Concrete Pumping': costs['concrete_pumping'],
-                'Rebar (All Components)': costs['rebar'],
-                'Post-Tensioning': costs['post_tensioning'],
-                'Core Walls (12" Fire Walls)': costs['core_walls'],
-                'Retaining Walls': costs['retaining_walls'],
-                'Ramp System': costs['ramp_system'],
-                'Elevators': costs['elevators'],
-                'Stairs': costs['stairs'],
-                'Structural Accessories': costs['structural_accessories'],
-                'MEP Systems': costs['mep'],
-                'VDC Coordination': costs['vdc_coordination'],
-                'Exterior Walls/Screen': costs['exterior'],
-                'Interior Finishes': costs['interior_finishes'],
-                'Special Systems': costs['special_systems'],
-                'Site Finishes': costs['site_finishes'],
-                'Subtotal': costs['hard_cost_subtotal']
-            },
-            'Soft Costs': {
-                'General Conditions': costs['general_conditions'],
-                'CM Fee': costs['cm_fee'],
-                'Insurance': costs['insurance'],
-                'Contingency': costs['contingency'],
-                'Subtotal': costs['soft_cost_subtotal']
-            },
-            'Total': costs['total'],
-            'Unit Costs': {
-                'Per Stall': costs['cost_per_stall'],
-                'Per SF (total GSF)': costs['cost_per_sf']
-            }
-        }
-
-        return breakdown
-
-    def get_detailed_quantity_takeoffs(self, garage: SplitLevelParkingGarage) -> Dict:
-        """
-        Return comprehensive quantity takeoffs with cost attribution for detailed UI display
-
-        Organizes all quantities into 9 major sections:
-        1. Foundation
-        2. Excavation & Earthwork
-        3. Structure - Concrete
-        4. Structure - Reinforcement (with component attribution)
-        5. Structure - Walls & Cores
-        6. Vertical Transportation
-        7. MEP Systems
-        8. Exterior & Finishes
-        9. Level-by-Level Summary
-
-        Each section contains detailed quantity breakdowns with:
-        - Component name
-        - Quantity value
-        - Unit type
-        - Unit cost
-        - Component total cost
-        - Description/notes
-
-        Returns:
-            Dict with structured data for accordion/table display
-        """
-        sections = {}
-
-        # Get helper data
-        wall_lf = garage.get_wall_linear_feet_breakdown()
-        column_data = garage.get_column_breakdown()
-        level_data = garage.get_level_breakdown()
-
-        # ========== SECTION 1: FOUNDATION ==========
-        foundation_items = []
-
-        # Slab on grade
-        sog_sf = garage.sog_levels_sf
-        sog_unit_cost = self.costs['structure']['slab_on_grade_5in_sf']
-        foundation_items.append({
-            'component': 'Slab on Grade (5" thick)',
-            'quantity': sog_sf,
-            'unit': 'SF',
-            'unit_cost': sog_unit_cost,
-            'total': sog_sf * sog_unit_cost,
-            'notes': f'{garage.footprint_sf:,.0f} SF footprint'
-        })
-
-        # Vapor barrier (moved to 'structure' section in cost database)
-        vapor_sf = sog_sf
-        vapor_unit_cost = self.costs['structure']['vapor_barrier_sf']
-        foundation_items.append({
-            'component': 'Under-Slab Vapor Barrier',
-            'quantity': vapor_sf,
-            'unit': 'SF',
-            'unit_cost': vapor_unit_cost,
-            'total': vapor_sf * vapor_unit_cost,
-            'notes': 'Under SOG area'
-        })
-
-        # Gravel (moved to 'structure' section, renamed to 'under_slab_gravel_sf')
-        gravel_sf = sog_sf
-        gravel_unit_cost = self.costs['structure']['under_slab_gravel_sf']
-        foundation_items.append({
-            'component': 'Under-Slab Gravel (4" thick)',
-            'quantity': gravel_sf,
-            'unit': 'SF',
-            'unit_cost': gravel_unit_cost,
-            'total': gravel_sf * gravel_unit_cost,
-            'notes': '4" compacted base'
-        })
-
-        # Spread footings (detailed breakdown by type)
-        if hasattr(garage, 'spread_footing_concrete_cy') and garage.spread_footing_concrete_cy > 0:
-            spread_concrete_cy = garage.spread_footing_concrete_cy
-            spread_rebar_lbs = garage.spread_footing_rebar_lbs
-            spread_excavation_cy = garage.spread_footing_excavation_cy
-
-            footing_concrete_cost = self.costs['foundation']['footings_spot_cy']
-            rebar_cost = self.component_costs['rebar_cost_per_lb']
-            excavation_cost = self.costs['below_grade_premiums']['mass_excavation_3_5ft_cy']
-
-            # Get footing details if available
-            if hasattr(garage, 'footing_details') and garage.footing_details:
-                spread_footings = garage.footing_details.get('spread_footings', {})
-                count_by_type = spread_footings.get('count_by_type', {})
-
-                for ftype, count in count_by_type.items():
-                    if count > 0:
-                        foundation_items.append({
-                            'component': f'  Spread Footings - {ftype.replace("_", " ").title()}',
-                            'quantity': count,
-                            'unit': 'EA',
-                            'unit_cost': None,
-                            'total': None,
-                            'notes': f'{count} footings'
-                        })
-
-            foundation_items.append({
-                'component': 'Spread Footings - Concrete',
-                'quantity': spread_concrete_cy,
-                'unit': 'CY',
-                'unit_cost': footing_concrete_cost,
-                'total': spread_concrete_cy * footing_concrete_cost,
-                'notes': f'Avg {spread_concrete_cy/max(1, garage.num_columns):.1f} CY per footing'
-            })
-
-            foundation_items.append({
-                'component': 'Spread Footings - Rebar',
-                'quantity': spread_rebar_lbs,
-                'unit': 'LBS',
-                'unit_cost': rebar_cost,
-                'total': spread_rebar_lbs * rebar_cost,
-                'notes': f'{spread_rebar_lbs/spread_concrete_cy:.0f} lbs/CY'
-            })
-
-            foundation_items.append({
-                'component': 'Spread Footings - Excavation',
-                'quantity': spread_excavation_cy,
-                'unit': 'CY',
-                'unit_cost': excavation_cost,
-                'total': spread_excavation_cy * excavation_cost,
-                'notes': 'Overdig for footings'
-            })
-
-        # Continuous footings
-        if hasattr(garage, 'continuous_footing_concrete_cy') and garage.continuous_footing_concrete_cy > 0:
-            cont_concrete_cy = garage.continuous_footing_concrete_cy
-            cont_rebar_lbs = garage.continuous_footing_rebar_lbs
-            cont_excavation_cy = garage.continuous_footing_excavation_cy
-
-            footing_concrete_cost = self.costs['foundation']['footings_spot_cy']
-            rebar_cost = self.component_costs['rebar_cost_per_lb']
-            excavation_cost = self.costs['below_grade_premiums']['mass_excavation_3_5ft_cy']
-
-            # Get detailed continuous footing info if available
-            if hasattr(garage, 'footing_details') and garage.footing_details:
-                cont_footings = garage.footing_details.get('continuous_footings', {})
-                footings_list = cont_footings.get('footings', [])
-
-                for ftg in footings_list:
-                    wall_type = ftg.get('wall_type', 'unknown')
-                    length_ft = ftg.get('length_ft', 0)
-                    width_ft = ftg.get('width_ft', 0)
-                    depth_ft = ftg.get('depth_ft', 0)
-
-                    foundation_items.append({
-                        'component': f'  Continuous Footing - {wall_type.replace("_", " ").title()}',
-                        'quantity': length_ft,
-                        'unit': 'LF',
-                        'unit_cost': None,
-                        'total': None,
-                        'notes': f'{width_ft:.1f}\'W × {depth_ft:.1f}\'D'
-                    })
-
-            foundation_items.append({
-                'component': 'Continuous Footings - Concrete',
-                'quantity': cont_concrete_cy,
-                'unit': 'CY',
-                'unit_cost': footing_concrete_cost,
-                'total': cont_concrete_cy * footing_concrete_cost,
-                'notes': f'Under elevator, stairs, cores'
-            })
-
-            foundation_items.append({
-                'component': 'Continuous Footings - Rebar',
-                'quantity': cont_rebar_lbs,
-                'unit': 'LBS',
-                'unit_cost': rebar_cost,
-                'total': cont_rebar_lbs * rebar_cost,
-                'notes': f'{cont_rebar_lbs/cont_concrete_cy:.0f} lbs/CY'
-            })
-
-            foundation_items.append({
-                'component': 'Continuous Footings - Excavation',
-                'quantity': cont_excavation_cy,
-                'unit': 'CY',
-                'unit_cost': excavation_cost,
-                'total': cont_excavation_cy * excavation_cost,
-                'notes': 'Trench excavation'
-            })
-
-        # Retaining wall footings (if below grade)
-        if hasattr(garage, 'retaining_wall_footing_concrete_cy') and garage.retaining_wall_footing_concrete_cy > 0:
-            ret_concrete_cy = garage.retaining_wall_footing_concrete_cy
-            ret_rebar_lbs = garage.retaining_wall_footing_rebar_lbs
-            ret_excavation_cy = garage.retaining_wall_footing_excavation_cy
-
-            footing_concrete_cost = self.costs['foundation']['footings_spot_cy']
-            rebar_cost = self.component_costs['rebar_cost_per_lb']
-            excavation_cost = self.costs['below_grade_premiums']['mass_excavation_3_5ft_cy']
-
-            foundation_items.append({
-                'component': 'Retaining Wall Footings - Concrete',
-                'quantity': ret_concrete_cy,
-                'unit': 'CY',
-                'unit_cost': footing_concrete_cost,
-                'total': ret_concrete_cy * footing_concrete_cost,
-                'notes': 'Cantilever footing'
-            })
-
-            foundation_items.append({
-                'component': 'Retaining Wall Footings - Rebar',
-                'quantity': ret_rebar_lbs,
-                'unit': 'LBS',
-                'unit_cost': rebar_cost,
-                'total': ret_rebar_lbs * rebar_cost,
-                'notes': f'{ret_rebar_lbs/ret_concrete_cy:.0f} lbs/CY'
-            })
-
-        sections['01_foundation'] = {
-            'title': '01 - FOUNDATION',
-            'items': foundation_items,
-            'total': sum(item['total'] for item in foundation_items if item['total'] is not None)
-        }
-
-        # ========== SECTION 2: EXCAVATION & EARTHWORK ==========
-        excavation_items = []
-
-        if garage.excavation_cy > 0:
-            mass_ex_cost = self.costs['below_grade_premiums']['mass_excavation_3_5ft_cy']
-            excavation_items.append({
-                'component': 'Mass Excavation',
-                'quantity': garage.excavation_cy,
-                'unit': 'CY',
-                'unit_cost': mass_ex_cost,
-                'total': garage.excavation_cy * mass_ex_cost,
-                'notes': f'{garage.half_levels_below} levels below grade'
-            })
-
-        if garage.export_cy > 0:
-            export_cost = self.costs['foundation']['export_excess_cy']
-            excavation_items.append({
-                'component': 'Export/Haul-Off',
-                'quantity': garage.export_cy,
-                'unit': 'CY',
-                'unit_cost': export_cost,
-                'total': garage.export_cy * export_cost,
-                'notes': 'Off-site disposal'
-            })
-
-        if garage.structural_fill_cy > 0:
-            fill_cost = self.costs['below_grade_premiums']['import_structural_fill_cy']
-            excavation_items.append({
-                'component': 'Structural Fill',
-                'quantity': garage.structural_fill_cy,
-                'unit': 'CY',
-                'unit_cost': fill_cost,
-                'total': garage.structural_fill_cy * fill_cost,
-                'notes': 'Compacted backfill'
-            })
-
-        if garage.retaining_wall_sf > 0:
-            ret_wall_cost = self.costs['below_grade_premiums']['retaining_wall_cw12_sf']
-            excavation_items.append({
-                'component': 'Retaining Walls (12" concrete)',
-                'quantity': garage.retaining_wall_sf,
-                'unit': 'SF',
-                'unit_cost': ret_wall_cost,
-                'total': garage.retaining_wall_sf * ret_wall_cost,
-                'notes': f'{garage.perimeter_lf:.0f} LF × {garage.depth_below_grade_ft:.1f}\' H'
-            })
-
-        if not excavation_items:
-            excavation_items.append({
-                'component': 'No below-grade construction',
-                'quantity': 0,
-                'unit': 'N/A',
-                'unit_cost': 0,
-                'total': 0,
-                'notes': 'All levels above grade'
-            })
-
-        sections['02_excavation'] = {
-            'title': '02 - EXCAVATION & EARTHWORK',
-            'items': excavation_items,
-            'total': sum(item['total'] for item in excavation_items if item['total'] is not None)
-        }
-
-        # ========== SECTION 3: STRUCTURE - CONCRETE ==========
-        concrete_items = []
-
-        # Suspended slabs
-        suspended_sf = garage.suspended_levels_sf
-        slab_cost_sf = self.costs['structure']['suspended_slab_8in_sf']
-        concrete_items.append({
-            'component': 'Suspended Slabs (8" PT)',
-            'quantity': suspended_sf,
-            'unit': 'SF',
-            'unit_cost': slab_cost_sf,
-            'total': suspended_sf * slab_cost_sf,
-            'notes': f'{garage.concrete_slab_cy:.0f} CY ({suspended_sf * (8/12) / 27:.0f} calculated)'
-        })
-
-        # Columns
-        column_cy = garage.concrete_columns_cy
-        column_cost_cy = self.costs['structure']['columns_18x24_cy']
-        concrete_items.append({
-            'component': f'Columns ({column_data["column_size"]})',
-            'quantity': column_cy,
-            'unit': 'CY',
-            'unit_cost': column_cost_cy,
-            'total': column_cy * column_cost_cy,
-            'notes': f'{column_data["total_count"]} columns × {column_data["average_height_ft"]:.1f}\' avg H = {column_data["total_linear_feet"]:.0f} LF'
-        })
-
-        # Concrete pumping
-        total_concrete_cy = garage.total_concrete_cy
-        pumping_cost = self.costs['structure']['concrete_pumping_cy']
-        concrete_items.append({
-            'component': 'Concrete Pumping',
-            'quantity': total_concrete_cy,
-            'unit': 'CY',
-            'unit_cost': pumping_cost,
-            'total': total_concrete_cy * pumping_cost,
-            'notes': f'All suspended concrete ({total_concrete_cy:.0f} CY total)'
-        })
-
-        sections['03_concrete'] = {
-            'title': '03 - STRUCTURE - CONCRETE',
-            'items': concrete_items,
-            'total': sum(item['total'] for item in concrete_items)
-        }
-
-        # ========== SECTION 4: STRUCTURE - REINFORCEMENT ==========
-        reinforcement_items = []
-
-        rebar_cost = self.component_costs['rebar_cost_per_lb']
-        pt_cost = self.costs['structure']['post_tension_cables_lbs']
-
-        # Footing rebar (already calculated above, consolidate here)
-        footing_rebar_lbs = garage.concrete_foundation_cy * 110
-        if hasattr(garage, 'spread_footing_rebar_lbs'):
-            footing_rebar_lbs = (garage.spread_footing_rebar_lbs +
-                               garage.continuous_footing_rebar_lbs)
-            if hasattr(garage, 'retaining_wall_footing_rebar_lbs'):
-                footing_rebar_lbs += garage.retaining_wall_footing_rebar_lbs
-
-        reinforcement_items.append({
-            'component': 'Footing Rebar',
-            'quantity': footing_rebar_lbs,
-            'unit': 'LBS',
-            'unit_cost': rebar_cost,
-            'total': footing_rebar_lbs * rebar_cost,
-            'notes': f'110 lbs/CY avg × {garage.concrete_foundation_cy:.0f} CY footings'
-        })
-
-        # Column rebar
-        column_rebar_lbs = column_cy * 1320
-        reinforcement_items.append({
-            'component': 'Column Rebar',
-            'quantity': column_rebar_lbs,
-            'unit': 'LBS',
-            'unit_cost': rebar_cost,
-            'total': column_rebar_lbs * rebar_cost,
-            'notes': f'1320 lbs/CY × {column_cy:.0f} CY columns'
-        })
-
-        # Slab rebar
-        slab_rebar_lbs = garage.total_slab_sf * 3.0
-        reinforcement_items.append({
-            'component': 'Slab Rebar',
-            'quantity': slab_rebar_lbs,
-            'unit': 'LBS',
-            'unit_cost': rebar_cost,
-            'total': slab_rebar_lbs * rebar_cost,
-            'notes': f'3.0 lbs/SF × {garage.total_slab_sf:,.0f} SF suspended slabs'
-        })
-
-        # Wall rebar (cores, barriers, enclosures)
-        wall_sf_total = (garage.elevator_shaft_sf + garage.stair_enclosure_sf +
-                        garage.utility_closet_sf + garage.storage_closet_sf)
-
-        if hasattr(garage, 'center_core_wall_sf') and garage.center_core_wall_sf > 0:
-            wall_sf_total += garage.center_core_wall_sf
-
-        if hasattr(garage, 'ramp_barrier_sf') and garage.ramp_barrier_sf > 0:
-            # Barriers already have rebar calculated
-            wall_sf_total += garage.ramp_barrier_sf
-
-        wall_rebar_lbs = wall_sf_total * 4.0  # 4.0 lbs/SF for walls
-
-        reinforcement_items.append({
-            'component': 'Wall/Core Rebar',
-            'quantity': wall_rebar_lbs,
-            'unit': 'LBS',
-            'unit_cost': rebar_cost,
-            'total': wall_rebar_lbs * rebar_cost,
-            'notes': f'4.0 lbs/SF × {wall_sf_total:,.0f} SF walls/cores'
-        })
-
-        # Post-tensioning cables
-        pt_lbs = garage.post_tension_lbs
-        reinforcement_items.append({
-            'component': 'Post-Tensioning Cables',
-            'quantity': pt_lbs,
-            'unit': 'LBS',
-            'unit_cost': pt_cost,
-            'total': pt_lbs * pt_cost,
-            'notes': f'1.25 lbs/SF × {garage.suspended_slab_sf:,.0f} SF suspended slabs'
-        })
-
-        sections['04_reinforcement'] = {
-            'title': '04 - STRUCTURE - REINFORCEMENT',
-            'items': reinforcement_items,
-            'total': sum(item['total'] for item in reinforcement_items)
-        }
-
-        # ========== SECTION 5: STRUCTURE - WALLS & CORES ==========
-        walls_items = []
-
-        wall_cost_sf = self.component_costs['core_wall_12in_cost_per_sf']
-
-        # Elevator shaft
-        elev_sf = garage.elevator_shaft_sf
-        elev_lf = wall_lf['elevator_shaft']['lf']
-        elev_height = wall_lf['elevator_shaft']['height_ft']
-        walls_items.append({
-            'component': 'Elevator Shaft (12" concrete)',
-            'quantity': elev_sf,
-            'unit': 'SF',
-            'unit_cost': wall_cost_sf,
-            'total': elev_sf * wall_cost_sf,
-            'notes': f'{elev_lf:.0f} LF × {elev_height:.1f}\' H'
-        })
-
-        # Stair enclosures
-        stair_sf = garage.stair_enclosure_sf
-        stair_lf = wall_lf['stair_enclosures']['total_lf']
-        stair_height = wall_lf['stair_enclosures']['height_ft']
-        walls_items.append({
-            'component': f'Stair Enclosures (12" concrete)',
-            'quantity': stair_sf,
-            'unit': 'SF',
-            'unit_cost': wall_cost_sf,
-            'total': stair_sf * wall_cost_sf,
-            'notes': f'{stair_lf:.0f} LF total × {stair_height:.1f}\' H ({garage.num_stairs} stairs)'
-        })
-
-        # Utility closet
-        util_sf = garage.utility_closet_sf
-        util_lf = wall_lf['utility_closet']['lf']
-        util_height = wall_lf['utility_closet']['height_ft']
-        walls_items.append({
-            'component': 'Utility Closet (12" concrete)',
-            'quantity': util_sf,
-            'unit': 'SF',
-            'unit_cost': wall_cost_sf,
-            'total': util_sf * wall_cost_sf,
-            'notes': f'{util_lf:.0f} LF × {util_height:.1f}\' H'
-        })
-
-        # Storage closet
-        stor_sf = garage.storage_closet_sf
-        stor_lf = wall_lf['storage_closet']['lf']
-        stor_height = wall_lf['storage_closet']['height_ft']
-        walls_items.append({
-            'component': 'Storage Closet (12" concrete)',
-            'quantity': stor_sf,
-            'unit': 'SF',
-            'unit_cost': wall_cost_sf,
-            'total': stor_sf * wall_cost_sf,
-            'notes': f'{stor_lf:.0f} LF × {stor_height:.1f}\' H'
-        })
-
-        # System-specific center elements
-        if 'center_core_walls' in wall_lf:
-            core_wall_sf = garage.center_core_wall_sf
-            core_lf = wall_lf['center_core_walls']['lf']
-            core_height = wall_lf['center_core_walls']['height_ft']
-            walls_items.append({
-                'component': 'Center Core Walls (12" concrete)',
-                'quantity': core_wall_sf,
-                'unit': 'SF',
-                'unit_cost': wall_cost_sf,
-                'total': core_wall_sf * wall_cost_sf,
-                'notes': f'{core_lf:.0f} LF × {core_height:.1f}\' H (split-level 2-bay)'
-            })
-
-            # Center curbs
-            curb_cost_cy = self.component_costs['curb_8x12_cy']  # $650/CY (placeholder)
-            curb_cy = garage.center_curb_concrete_cy
-            curb_lf = wall_lf['center_curbs']['total_lf']
-            walls_items.append({
-                'component': 'Center Curbs (8" × 12")',
-                'quantity': curb_cy,
-                'unit': 'CY',
-                'unit_cost': curb_cost_cy,
-                'total': curb_cy * curb_cost_cy,
-                'notes': f'{curb_lf:.0f} LF total (both sides × {garage.total_levels} levels)'
-            })
-
-        if 'ramp_barriers' in wall_lf:
-            barrier_sf = garage.ramp_barrier_sf
-            barrier_lf = wall_lf['ramp_barriers']['total_lf']
-            barrier_thickness = wall_lf['ramp_barriers']['thickness_in']
-            barrier_height = wall_lf['ramp_barriers']['height_in']
-
-            # Calculate barrier cost (concrete + rebar)
-            # NOTE: barrier_sf already accounts for both faces (geometry module multiplies by 2)
-            # Cost at $28.50/SF applies to both-faces-already-counted SF
-            wall_cost_per_sf = self.component_costs['core_wall_12in_cost_per_sf']  # $28.50/SF
-            barrier_rebar_lbs = garage.ramp_barrier_rebar_lbs
-            barrier_concrete_cost = barrier_sf * wall_cost_per_sf
-            barrier_rebar_cost = barrier_rebar_lbs * rebar_cost
-            barrier_total = barrier_concrete_cost + barrier_rebar_cost
-            barrier_cost_sf = barrier_total / barrier_sf if barrier_sf > 0 else 0
-
-            walls_items.append({
-                'component': f'Ramp Barriers ({barrier_height}" × {barrier_thickness}")',
-                'quantity': barrier_sf,
-                'unit': 'SF',
-                'unit_cost': barrier_cost_sf,
-                'total': barrier_total,
-                'notes': f'{barrier_lf:.0f} LF total (split-level 3+ bay or single-ramp)'
-            })
-
-        # Top level barriers
-        if hasattr(garage, 'top_level_barrier_12in_sf') and garage.top_level_barrier_12in_sf > 0:
-            top_barrier_sf = garage.top_level_barrier_12in_sf
-            walls_items.append({
-                'component': 'Top Level Closure Walls (12")',
-                'quantity': top_barrier_sf,
-                'unit': 'SF',
-                'unit_cost': wall_cost_sf,
-                'total': top_barrier_sf * wall_cost_sf,
-                'notes': 'North end termination'
-            })
-
-        # Elevator pit CMU (always - standard construction practice)
-        cmu_sf = garage.elevator_pit_cmu_sf
-        cmu_cost = self.costs['structure']['masonry_wall_8in_sf']
-        walls_items.append({
-            'component': 'Elevator Pit (8" CMU)',
-            'quantity': cmu_sf,
-            'unit': 'SF',
-            'unit_cost': cmu_cost,
-            'total': cmu_sf * cmu_cost,
-            'notes': f'{elev_lf:.0f} LF × 8\' pit depth (CMU below concrete shaft)'
-        })
-
-        sections['05_walls_cores'] = {
-            'title': '05 - STRUCTURE - WALLS & CORES',
-            'items': walls_items,
-            'total': sum(item['total'] for item in walls_items)
-        }
-
-        # ========== SECTION 6: VERTICAL TRANSPORTATION ==========
-        vertical_items = []
-
-        # Elevators
-        elevator_stops = garage.num_elevator_stops
-        elevator_cost_per_stop = self.component_costs['elevator_cost_per_stop']
-        vertical_items.append({
-            'component': 'Elevator',
-            'quantity': elevator_stops,
-            'unit': 'Stops',
-            'unit_cost': elevator_cost_per_stop,
-            'total': elevator_stops * elevator_cost_per_stop,
-            'notes': f'{elevator_stops} stops (1 per level)'
-        })
-
-        # Stairs
-        stair_flights = garage.num_stair_flights
-        stair_cost_per_flight = self.component_costs['stair_flight_cost']
-        vertical_items.append({
-            'component': 'Stairs (Metal Pan)',
-            'quantity': stair_flights,
-            'unit': 'Flights',
-            'unit_cost': stair_cost_per_flight,
-            'total': stair_flights * stair_cost_per_flight,
-            'notes': f'{stair_flights} flights ({garage.num_stairs} stairs × {garage.total_levels} levels × 2 flights/level)'
-        })
-
-        sections['06_vertical'] = {
-            'title': '06 - VERTICAL TRANSPORTATION',
-            'items': vertical_items,
-            'total': sum(item['total'] for item in vertical_items)
-        }
-
-        # ========== SECTION 7: MEP SYSTEMS ==========
-        mep_items = []
-
-        total_gsf = garage.total_gsf
-
-        # Fire protection
-        fire_cost_sf = self.costs['mep']['fire_protection_parking_sf']
-        mep_items.append({
-            'component': 'Fire Protection (Sprinklers)',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': fire_cost_sf,
-            'total': total_gsf * fire_cost_sf,
-            'notes': f'{total_gsf:,.0f} SF total GSF'
-        })
-
-        # Plumbing
-        plumbing_cost_sf = self.costs['mep']['plumbing_parking_sf']
-        mep_items.append({
-            'component': 'Plumbing',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': plumbing_cost_sf,
-            'total': total_gsf * plumbing_cost_sf,
-            'notes': 'Drains, domestic water'
-        })
-
-        # HVAC/Ventilation
-        hvac_cost_sf = self.costs['mep']['hvac_parking_sf']
-        mep_items.append({
-            'component': 'HVAC/Ventilation',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': hvac_cost_sf,
-            'total': total_gsf * hvac_cost_sf,
-            'notes': 'Exhaust fans, ductwork'
-        })
-
-        # Electrical/Lighting
-        electrical_cost_sf = self.costs['mep']['electrical_parking_sf']
-        mep_items.append({
-            'component': 'Electrical/Lighting',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': electrical_cost_sf,
-            'total': total_gsf * electrical_cost_sf,
-            'notes': 'Service, distribution, lighting'
-        })
-
-        sections['07_mep'] = {
-            'title': '07 - MEP SYSTEMS',
-            'items': mep_items,
-            'total': sum(item['total'] for item in mep_items)
-        }
-
-        # ========== SECTION 8: EXTERIOR & FINISHES ==========
-        exterior_items = []
-
-        # Parking screen
-        screen_sf = garage.exterior_wall_sf
-        screen_cost_sf = self.costs['exterior']['parking_screen_sf']
-        exterior_items.append({
-            'component': 'Parking Screen (Brake Metal)',
-            'quantity': screen_sf,
-            'unit': 'SF',
-            'unit_cost': screen_cost_sf,
-            'total': screen_sf * screen_cost_sf,
-            'notes': f'{garage.perimeter_lf:.0f} LF × 15\' H'
-        })
-
-        # Sealed concrete
-        sealed_cost_sf = self.costs['site']['sealed_concrete_parking_sf']
-        exterior_items.append({
-            'component': 'Sealed Concrete Finish',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': sealed_cost_sf,
-            'total': total_gsf * sealed_cost_sf,
-            'notes': 'All parking surfaces'
-        })
-
-        # Pavement markings
-        total_stalls = garage.total_stalls
-        marking_cost_per_stall = self.costs['site']['pavement_markings_per_stall']
-        exterior_items.append({
-            'component': 'Pavement Markings/Striping',
-            'quantity': total_stalls,
-            'unit': 'Stalls',
-            'unit_cost': marking_cost_per_stall,
-            'total': total_stalls * marking_cost_per_stall,
-            'notes': f'{total_stalls} stall striping'
-        })
-
-        # Final cleaning
-        cleaning_cost_sf = self.costs['site']['final_cleaning_parking_sf']
-        exterior_items.append({
-            'component': 'Final Cleaning',
-            'quantity': total_gsf,
-            'unit': 'SF',
-            'unit_cost': cleaning_cost_sf,
-            'total': total_gsf * cleaning_cost_sf,
-            'notes': 'Post-construction cleanup'
-        })
-
-        sections['08_exterior_finishes'] = {
-            'title': '08 - EXTERIOR & FINISHES',
-            'items': exterior_items,
-            'total': sum(item['total'] for item in exterior_items)
-        }
-
-        # ========== SECTION 9: LEVEL-BY-LEVEL SUMMARY ==========
-        # This section uses level_data directly
-        sections['09_level_summary'] = {
-            'title': '09 - LEVEL-BY-LEVEL SUMMARY',
-            'levels': level_data,
-            'total_gsf': total_gsf,
-            'total_stalls': total_stalls
-        }
-
-        return sections
-
-    def get_tr_comparison(self, garage: SplitLevelParkingGarage) -> Dict:
-        """
-        Generate TechRidge budget comparison report
-
-        Maps our internal single-owner cost components to TechRidge categories for
-        comparison, without changing how costs are calculated internally.
-
-        Presentation rules:
-        - VDC is folded into General Conditions (TR-style)
-        - MEP split is itemized from rates (Fire/Plumbing/HVAC vs Electrical)
-        - Site-owned items (sealed concrete, final cleaning, striping) re-bucketed
-          into TR Interior/Special categories for presentation only.
-
-        Returns dict with:
-        - tr_categories: List of TR line items with our mapped costs
-        - total_variance: Overall cost difference
-        - variance_pct: Overall percentage difference
-        - unit_cost_comparison: $/SF and $/stall metrics
-        """
-        # Load presentation mapping (configurable, but current code applies rules directly)
-        try:
-            data_dir = Path(__file__).parent.parent / 'data'
-            with open(data_dir / 'reference_budget_map.json', 'r') as f:
-                mapping_cfg = json.load(f)
-        except Exception:
-            mapping_cfg = {
-                "presentation_rules": {
-                    "fold_vdc_into_gc": True,
-                    "derive_mechanical_electrical_from_rates": True
-                }
-            }
-
-        costs = self.calculate_all_costs(garage)
-
-        # TechRidge parking budget from 1.2 SD Budget PDF (May 2025)
-        tr_budget = {
-            "Foundation & Below-Grade": {
-                "tr_cost": 965_907,
-                "our_components": ["foundation", "excavation"],
-                "notes": "Footings, SOG, excavation, retaining walls, waterproofing"
-            },
-            "Superstructure - Parking": {
-                "tr_cost": 6_044_740,
-                "our_components": [
-                    "structure_above", "structure_below", "concrete_pumping",
-                    "rebar", "post_tensioning", "core_walls", "stairs",
-                    "structural_accessories"
-                ],
-                "notes": "Slabs, columns, rebar, PT, walls, stairs, accessories"
-            },
-            "Exterior Closure": {
-                "tr_cost": 829_840,
-                "our_components": ["exterior"],
-                "notes": "Parking screen (brake metal panels)"
-            },
-            "Interior Finishes": {
-                "tr_cost": 313_766,
-                "our_components": ["interior_finishes"],
-                "notes": "Sealed concrete, painting, doors, cleaning"
-            },
-            "Special Systems": {
-                "tr_cost": 50_200,
-                "our_components": ["special_systems"],
-                "notes": "Fire extinguishers, pavement markings, knox box"
-            },
-            "Conveying Systems": {
-                "tr_cost": 347_017,
-                "our_components": ["elevators"],
-                "notes": "Elevators with accessories, permits, warranties"
-            },
-            "Mechanical (Fire/Plumbing/HVAC)": {
-                "tr_cost": 859_444,
-                "our_components": ["mep"],  # Partial - 70% of our MEP
-                "our_cost_multiplier": 0.70,  # MEP is split between Mechanical and Electrical
-                "notes": "Fire protection, plumbing, HVAC ventilation"
-            },
-            "Electrical (Lighting/Power)": {
-                "tr_cost": 413_806,
-                "our_components": ["mep"],  # Partial - 30% of our MEP
-                "our_cost_multiplier": 0.30,
-                "notes": "Electrical service, distribution, lighting, EV rough-in"
-            },
-            "Site Work": {
-                "tr_cost": 403_382,
-                "our_components": ["site_finishes"],
-                "notes": "Sealed concrete, striping, cleaning (utilities NOT modeled)"
-            },
-            "General Conditions": {
-                "tr_cost": 958_008,
-                "our_components": ["general_conditions"],
-                "notes": "9.37% of hard costs (or monthly rate method)"
-            },
-            "CM Fee": {
-                "tr_cost": 490_888,
-                "our_components": ["cm_fee"],
-                "notes": "4.39% of (hard + GC)"
-            },
-            "Insurance": {
-                "tr_cost": 134_994,
-                "our_components": ["insurance"],
-                "notes": "1.21% of (hard + GC)"
-            },
-            "Contingency": {
-                "tr_cost": 460_208,
-                "our_components": ["contingency"],
-                "notes": "4.12% of (hard + GC) - combined CM + design contingency"
-            },
-            "VDC Coordination": {
-                "tr_cost": 0,  # Not broken out separately in TR (likely in GC)
-                "our_components": ["vdc_coordination"],
-                "notes": "BIM coordination - NOT separately shown in TR budget"
-            }
-        }
-
-        tr_total = 12_272_200  # Total parking portion from TR budget
-
-        # Build our costs per TR category using presentation mapping rules
-        total_gsf = garage.total_gsf
-        total_stalls = garage.total_stalls
-
-        # Itemized MEP based on rates (aligns to TR categories)
-        fire_cost = total_gsf * self.costs['mep']['fire_protection_parking_sf']
-        plumbing_cost = total_gsf * self.costs['mep']['plumbing_parking_sf']
-        hvac_cost = total_gsf * self.costs['mep']['hvac_parking_sf']
-        electrical_cost = total_gsf * self.costs['mep']['electrical_parking_sf']
-
-        # Site items that are re-bucketed for TR presentation
-        sealed_concrete_cost = total_gsf * self.costs['site']['sealed_concrete_parking_sf']
-        final_cleaning_cost = total_gsf * self.costs['site']['final_cleaning_parking_sf']
-        striping_cost = total_stalls * self.costs['site']['pavement_markings_per_stall']
-
-        # TR category mappings (keys must match tr_budget keys exactly)
-        our_by_tr = {
-            "Foundation & Below-Grade": costs['foundation'] + costs['excavation'],
-            "Superstructure - Parking": (costs['structure_above'] + costs['structure_below'] +
-                               costs['concrete_pumping'] + costs['rebar'] +
-                               costs['post_tensioning'] + costs['core_walls'] +
-                               costs['stairs'] + costs['structural_accessories']),
-            "Exterior Closure": costs['exterior'],
-            # Interior includes painting/doors + re-bucketed sealed concrete + final cleaning
-            "Interior Finishes": (costs['interior_finishes'] +
-                                  sealed_concrete_cost + final_cleaning_cost),
-            # Special Systems includes our special + re-bucketed striping
-            "Special Systems": costs['special_systems'] + striping_cost,
-            "Conveying Systems": costs['elevators'],
-            "Mechanical (Fire/Plumbing/HVAC)": fire_cost + plumbing_cost + hvac_cost,
-            "Electrical (Lighting/Power)": electrical_cost,
-            # Site Work excludes items re-bucketed to Interior/Special in presentation
-            "Site Work": (costs['site_finishes'] -
-                          sealed_concrete_cost - final_cleaning_cost - striping_cost),
-            # GC folds VDC for TR presentation only
-            "General Conditions": costs['general_conditions'] + (costs.get('vdc_coordination', 0) if mapping_cfg.get("presentation_rules", {}).get("fold_vdc_into_gc", True) else 0),
-            "CM Fee": costs['cm_fee'],
-            "Insurance": costs['insurance'],
-            "Contingency": costs['contingency'],
-            "VDC Coordination": 0  # Not separately shown in TR, folded into GC
-        }
-
-        # Build comparison categories against TR
-        comparison_categories = []
-
-        for category_name, category_data in tr_budget.items():
-            our_cost = our_by_tr.get(category_name, 0)
-
-            tr_cost = category_data["tr_cost"]
-            variance = our_cost - tr_cost
-            variance_pct = (variance / tr_cost * 100) if tr_cost > 0 else 0
-
-            # Determine status icon
-            if tr_cost == 0:
-                status = "⊕"  # Our item, not in TR
-            elif abs(variance_pct) < 10:
-                status = "✓"  # Within 10%
-            elif abs(variance_pct) < 20:
-                status = "⚠️"  # Within 20%
-            else:
-                status = "❌"  # Over 20% variance
-
-            comparison_categories.append({
-                "category": category_name,
-                "tr_cost": tr_cost,
-                "our_cost": our_cost,
-                "variance": variance,
-                "variance_pct": variance_pct,
-                "status": status,
-                "notes": category_data["notes"]
-            })
-
-        # Calculate total variance
-        total_variance = costs['total'] - tr_total
-        total_variance_pct = (total_variance / tr_total * 100)
-
-        # Unit cost comparison
-        tr_sf = 127_325  # TR total GSF
-        tr_stalls = 319  # TR total stalls
-        tr_cost_per_sf = tr_total / tr_sf
-        tr_cost_per_stall = tr_total / tr_stalls
-
-        return {
-            "categories": comparison_categories,
-            "totals": {
-                "tr_total": tr_total,
-                "our_total": costs['total'],
-                "variance": total_variance,
-                "variance_pct": total_variance_pct
-            },
-            "unit_costs": {
-                "tr_cost_per_sf": tr_cost_per_sf,
-                "our_cost_per_sf": costs['cost_per_sf'],
-                "tr_cost_per_stall": tr_cost_per_stall,
-                "our_cost_per_stall": costs['cost_per_stall']
-            },
-            "geometry": {
-                "tr_gsf": tr_sf,
-                "our_gsf": garage.total_gsf,
-                "tr_stalls": tr_stalls,
-                "our_stalls": garage.total_stalls
-            }
-        }
-
-
-def load_cost_database() -> Dict:
-    """Load cost database from JSON"""
-    data_dir = Path(__file__).parent.parent / 'data'
-    with open(data_dir / 'cost_database.json', 'r') as f:
-        return json.load(f)
-
-
-if __name__ == "__main__":
-    # Test cost calculator
-    print("Testing cost calculator with baseline design...")
-
-    from .geometry import SplitLevelParkingGarage
-
-    # Create baseline garage (126' × 210', 2 bays, 5 floors above, 0 below)
-    garage = SplitLevelParkingGarage(210, 5, 0)
-
-    # Load costs and calculate
-    cost_db = load_cost_database()
-    calculator = CostCalculator(cost_db)
-    breakdown = calculator.get_cost_breakdown_table(garage)
-
-    # Display
-    print("\n=== COST BREAKDOWN ===")
-    print(json.dumps(breakdown, indent=2))
-
-    # Validation
-    expected_total = cost_db['base_design']['total_cost']
-    calculated_total = breakdown['Total']
-    error_pct = abs(calculated_total - expected_total) / expected_total * 100
-
-    print(f"\n=== VALIDATION ===")
-    print(f"Expected total: ${expected_total:,.0f}")
-    print(f"Calculated total: ${calculated_total:,.0f}")
-    print(f"Error: {error_pct:.1f}%")
-    print(f"Match: {'✓' if error_pct < 10 else '✗'}")
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:spread_footings_concrete",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="spread_footing_concrete",
+            quantity=garage.spread_footing_concrete_cy,
+            unit="CY",
+            unit_cost_key="foundation.footings_spot_cy",
+            unit_cost_value=self.costs["foundation"]["footings_spot_cy"],
+            category="foundation",
+            description="Spread Footing Concrete",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:spread_footings_rebar",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="spread_footing_rebar",
+            quantity=garage.spread_footing_rebar_lbs,
+            unit="LB",
+            unit_cost_key="foundation.rebar_footings_lbs",
+            unit_cost_value=self.costs["foundation"]["rebar_footings_lbs"],
+            category="foundation",
+            description="Spread Footing Rebar",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:spread_footings_excavation",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="spread_footing_excavation",
+            quantity=garage.spread_footing_excavation_cy,
+            unit="CY",
+            unit_cost_key="foundation.excavation_footings_cy",
+            unit_cost_value=self.costs["foundation"]["excavation_footings_cy"],
+            category="foundation",
+            description="Spread Footing Excavation",
+            source_pass="foundation",
+        )
+
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:continuous_footings_concrete",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="continuous_footing_concrete",
+            quantity=garage.continuous_footing_concrete_cy,
+            unit="CY",
+            unit_cost_key="foundation.footings_continuous_cy",
+            unit_cost_value=self.costs["foundation"]["footings_continuous_cy"],
+            category="foundation",
+            description="Continuous Footing Concrete",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:continuous_footings_rebar",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="continuous_footing_rebar",
+            quantity=garage.continuous_footing_rebar_lbs,
+            unit="LB",
+            unit_cost_key="foundation.rebar_footings_lbs",
+            unit_cost_value=self.costs["foundation"]["rebar_footings_lbs"],
+            category="foundation",
+            description="Continuous Footing Rebar",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:continuous_footings_excavation",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="continuous_footing_excavation",
+            quantity=garage.continuous_footing_excavation_cy,
+            unit="CY",
+            unit_cost_key="foundation.excavation_footings_cy",
+            unit_cost_value=self.costs["foundation"]["excavation_footings_cy"],
+            category="foundation",
+            description="Continuous Footing Excavation",
+            source_pass="foundation",
+        )
+
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:retaining_footings_concrete",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="retaining_footing_concrete",
+            quantity=getattr(garage, "retaining_wall_footing_concrete_cy", 0.0),
+            unit="CY",
+            unit_cost_key="foundation.footings_continuous_cy",
+            unit_cost_value=self.costs["foundation"]["footings_continuous_cy"],
+            category="foundation",
+            description="Retaining Wall Footing Concrete",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:retaining_footings_rebar",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="retaining_footing_rebar",
+            quantity=getattr(garage, "retaining_wall_footing_rebar_lbs", 0.0),
+            unit="LB",
+            unit_cost_key="foundation.rebar_footings_lbs",
+            unit_cost_value=self.costs["foundation"]["rebar_footings_lbs"],
+            category="foundation",
+            description="Retaining Wall Footing Rebar",
+            source_pass="foundation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{foundation_key}:retaining_footings_excavation",
+            element_type="foundation_component",
+            parent=foundation_key,
+            measure="retaining_footing_excavation",
+            quantity=getattr(garage, "retaining_wall_footing_excavation_cy", 0.0),
+            unit="CY",
+            unit_cost_key="foundation.excavation_footings_cy",
+            unit_cost_value=self.costs["foundation"]["excavation_footings_cy"],
+            category="foundation",
+            description="Retaining Wall Footing Excavation",
+            source_pass="foundation",
+        )
+
+        if hasattr(garage, "backfill_foundation_cy"):
+            total += self._add_cost_line(
+                element_key=f"{foundation_key}:backfill_foundation",
+                element_type="foundation_component",
+                parent=foundation_key,
+                measure="backfill_foundation",
+                quantity=garage.backfill_foundation_cy,
+                unit="CY",
+                unit_cost_key="foundation.backfill_cy",
+                unit_cost_value=self.costs["foundation"]["backfill_cy"],
+                category="foundation",
+                description="Foundation Backfill",
+                source_pass="foundation",
+            )
+
+        if hasattr(garage, "backfill_ramp_cy"):
+            total += self._add_cost_line(
+                element_key=f"{foundation_key}:backfill_ramp",
+                element_type="foundation_component",
+                parent=foundation_key,
+                measure="backfill_ramp",
+                quantity=garage.backfill_ramp_cy,
+                unit="CY",
+                unit_cost_key="foundation.backfill_cy",
+                unit_cost_value=self.costs["foundation"]["backfill_cy"],
+                category="foundation",
+                description="Ramp Backfill",
+                source_pass="foundation",
+            )
+
+        return total
+
+    def _excavation_costs(self, garage) -> float:
+        if garage.half_levels_below == 0:
+            return 0.0
+
+        total = 0.0
+        excavation_key = "excavation"
+        self._ensure_element(excavation_key, "excavation_scope")
+
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:mass_excavation",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="mass_excavation",
+            quantity=garage.excavation_cy,
+            unit="CY",
+            unit_cost_key="below_grade_premiums.mass_excavation_3_5ft_cy",
+            unit_cost_value=self.costs["below_grade_premiums"]["mass_excavation_3_5ft_cy"],
+            category="excavation",
+            description="Mass Excavation",
+            source_pass="excavation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:export",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="export_volume",
+            quantity=garage.export_cy,
+            unit="CY",
+            unit_cost_key="foundation.export_excess_cy",
+            unit_cost_value=self.costs["foundation"]["export_excess_cy"],
+            category="excavation",
+            description="Export / Haul-off",
+            source_pass="excavation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:structural_fill",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="structural_fill",
+            quantity=garage.structural_fill_cy,
+            unit="CY",
+            unit_cost_key="below_grade_premiums.import_structural_fill_cy",
+            unit_cost_value=self.costs["below_grade_premiums"]["import_structural_fill_cy"],
+            category="excavation",
+            description="Structural Fill Import",
+            source_pass="excavation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:retaining_walls",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="retaining_wall_area",
+            quantity=garage.retaining_wall_sf,
+            unit="SF",
+            unit_cost_key="below_grade_premiums.retaining_wall_cw12_sf",
+            unit_cost_value=self.costs["below_grade_premiums"]["retaining_wall_cw12_sf"],
+            category="excavation",
+            description="Retaining Wall Concrete (12 in)",
+            source_pass="excavation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:dampproofing",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="dampproofing_area",
+            quantity=garage.retaining_wall_sf,
+            unit="SF",
+            unit_cost_key="foundation.dampproofing_sf",
+            unit_cost_value=self.costs["foundation"]["dampproofing_sf"],
+            category="excavation",
+            description="Retaining Wall Dampproofing",
+            source_pass="excavation",
+        )
+        total += self._add_cost_line(
+            element_key=f"{excavation_key}:under_slab_drainage",
+            element_type="excavation_component",
+            parent=excavation_key,
+            measure="under_slab_drainage_area",
+            quantity=garage.footprint_sf,
+            unit="SF",
+            unit_cost_key="below_grade_premiums.under_slab_drainage_sf",
+            unit_cost_value=self.costs["below_grade_premiums"]["under_slab_drainage_sf"],
+            category="excavation",
+            description="Under-slab Drainage Layer",
+            source_pass="excavation",
+        )
+        if hasattr(garage, "elevator_pit_waterproofing_sf"):
+            total += self._add_cost_line(
+                element_key=f"{excavation_key}:elevator_pit_waterproofing",
+                element_type="excavation_component",
+                parent=excavation_key,
+                measure="elevator_pit_waterproofing_area",
+                quantity=garage.elevator_pit_waterproofing_sf,
+                unit="SF",
+                unit_cost_key="below_grade_premiums.waterproofing_elevator_pit_sf",
+                unit_cost_value=self.costs["below_grade_premiums"]["waterproofing_elevator_pit_sf"],
+                category="excavation",
+                description="Elevator Pit Waterproofing",
+                source_pass="excavation",
+            )
+
+        return total
+
+    def _structure_concrete_costs(self, garage) -> float:
+        total = 0.0
+        structure_key = "structure"
+        self._ensure_element(structure_key, "structural_system")
+
+        total += self._add_cost_line(
+            element_key=f"{structure_key}:suspended_slab",
+            element_type="structural_component",
+            parent=structure_key,
+            measure="suspended_slab_area",
+            quantity=garage.suspended_levels_sf,
+            unit="SF",
+            unit_cost_key="structure.suspended_slab_8in_sf",
+            unit_cost_value=self.costs["structure"]["suspended_slab_8in_sf"],
+            category="structure",
+            description="Suspended PT Slabs (8 in)",
+            source_pass="structure",
+        )
+        total += self._add_cost_line(
+            element_key=f"{structure_key}:columns",
+            element_type="structural_component",
+            parent=structure_key,
+            measure="column_concrete",
+            quantity=garage.concrete_columns_cy,
+            unit="CY",
+            unit_cost_key="structure.columns_18x24_cy",
+            unit_cost_value=self.costs["structure"]["columns_18x24_cy"],
+            category="structure",
+            description="Perimeter Columns (18x24)",
+            source_pass="structure",
+        )
+
+        return total
+
+    def _concrete_pumping(self, garage) -> float:
+        return self._add_cost_line(
+            element_key="structure:concrete_pumping",
+            element_type="structural_component",
+            parent="structure",
+            measure="concrete_volume_for_pumping",
+            quantity=garage.total_concrete_cy,
+            unit="CY",
+            unit_cost_key="structure.concrete_pumping_cy",
+            unit_cost_value=self.costs["structure"]["concrete_pumping_cy"],
+            category="structure",
+            description="Concrete Pumping",
+            source_pass="structure",
+        )
+
+    def _rebar_costs(self, garage) -> float:
+        total = 0.0
+        rebar_rate = self.component_costs["rebar_cost_per_lb"]
+
+        total += self._add_cost_line(
+            element_key="structure:rebar_slabs",
+            element_type="structural_component",
+            parent="structure",
+            measure="slab_rebar_weight",
+            quantity=garage.suspended_slab_sf
+            * self.component_costs["rebar_pt_slab_lbs_per_sf"],
+            unit="LB",
+            unit_cost_key="component_specific_costs.rebar_cost_per_lb",
+            unit_cost_value=rebar_rate,
+            category="structure",
+            description="Suspended Slab Rebar",
+            source_pass="structure",
+        )
+        total += self._add_cost_line(
+            element_key="structure:rebar_columns",
+            element_type="structural_component",
+            parent="structure",
+            measure="column_rebar_weight",
+            quantity=garage.concrete_columns_cy
+            * self.component_costs["rebar_columns_lbs_per_cy_concrete"],
+            unit="LB",
+            unit_cost_key="component_specific_costs.rebar_cost_per_lb",
+            unit_cost_value=rebar_rate,
+            category="structure",
+            description="Column Rebar",
+            source_pass="structure",
+        )
+        return total
+
+    def _post_tensioning_costs(self, garage) -> float:
+        return self._add_cost_line(
+            element_key="structure:post_tensioning",
+            element_type="structural_component",
+            parent="structure",
+            measure="post_tension_weight",
+            quantity=garage.post_tension_lbs,
+            unit="LB",
+            unit_cost_key="component_specific_costs.post_tension_cable_cost_per_lb",
+            unit_cost_value=self.component_costs["post_tension_cable_cost_per_lb"],
+            category="structure",
+            description="Post-tension Cables",
+            source_pass="structure",
+        )
+
+    def _core_wall_costs(self, garage) -> float:
+        core_wall_sf = (
+            getattr(garage, "center_core_wall_sf", 0.0)
+            + garage.elevator_shaft_sf
+            + garage.stair_enclosure_sf
+            + garage.utility_closet_sf
+            + garage.storage_closet_sf
+        )
+        if core_wall_sf == 0:
+            return 0.0
+        return self._add_cost_line(
+            element_key="structure:core_walls",
+            element_type="structural_component",
+            parent="structure",
+            measure="core_wall_area",
+            quantity=core_wall_sf,
+            unit="SF",
+            unit_cost_key="component_specific_costs.core_wall_12in_cost_per_sf",
+            unit_cost_value=self.component_costs["core_wall_12in_cost_per_sf"],
+            category="structure",
+            description="12 in Core Walls",
+            source_pass="structure",
+        )
+
+    def _retaining_wall_costs(self, garage) -> float:
+        retaining_sf = getattr(garage, "retaining_wall_sf", 0.0)
+        if retaining_sf == 0:
+            return 0.0
+        return self._add_cost_line(
+            element_key="structure:retaining_walls",
+            element_type="structural_component",
+            parent="structure",
+            measure="retaining_wall_area",
+            quantity=retaining_sf,
+            unit="SF",
+            unit_cost_key="below_grade_premiums.retaining_wall_cw12_sf",
+            unit_cost_value=self.costs["below_grade_premiums"]["retaining_wall_cw12_sf"],
+            category="structure",
+            description="Retaining Wall Concrete",
+            source_pass="structure",
+        )
+
+    def _elevator_costs(self, garage) -> float:
+        return self._add_cost_line(
+            element_key="vertical:elevator",
+            element_type="vertical_transport_component",
+            parent="cost_summary",
+            measure="elevator_stops",
+            quantity=garage.num_elevator_stops,
+            unit="STOP",
+            unit_cost_key="component_specific_costs.elevator_cost_per_stop",
+            unit_cost_value=self.component_costs["elevator_cost_per_stop"],
+            category="vertical_transportation",
+            description="Elevator Stops",
+            source_pass="vertical_transportation",
+        )
+
+    def _stair_costs(self, garage) -> float:
+        total = 0.0
+        total += self._add_cost_line(
+            element_key="vertical:stair_flights",
+            element_type="vertical_transport_component",
+            parent="cost_summary",
+            measure="stair_flights",
+            quantity=garage.num_stair_flights,
+            unit="FLIGHT",
+            unit_cost_key="component_specific_costs.stair_flight_cost",
+            unit_cost_value=self.component_costs["stair_flight_cost"],
+            category="vertical_transportation",
+            description="Stair Flights",
+            source_pass="vertical_transportation",
+        )
+        total += self._add_cost_line(
+            element_key="vertical:stair_railings",
+            element_type="vertical_transport_component",
+            parent="cost_summary",
+            measure="stair_railings",
+            quantity=garage.num_stair_flights,
+            unit="FLIGHT",
+            unit_cost_key="component_specific_costs.stair_railing_per_flight",
+            unit_cost_value=self.component_costs["stair_railing_per_flight"],
+            category="vertical_transportation",
+            description="Stair Railings",
+            source_pass="vertical_transportation",
+        )
+        return total
+
+    def _structural_accessories(self, garage) -> float:
+        # Use per-joint stud rails count if available; otherwise fall back to num_columns
+        stud_count = getattr(garage, "stud_rail_required_joints", None)
+        quantity = stud_count if isinstance(stud_count, (int, float)) and stud_count >= 0 else garage.num_columns
+        return self._add_cost_line(
+            element_key="structure:stud_rails",
+            element_type="structural_component",
+            parent="structure",
+            measure="stud_rail_count",
+            quantity=quantity,
+            unit="EA",
+            unit_cost_key="component_specific_costs.stud_rails_per_column",
+            unit_cost_value=self.component_costs["stud_rails_per_column"],
+            category="structure",
+            description="Column Stud Rails",
+            source_pass="structure",
+        )
+
+    def _mep_costs(self, garage) -> float:
+        total = 0.0
+        total += self._add_cost_line(
+            element_key="mep:fire_protection",
+            element_type="mep_component",
+            parent="cost_summary",
+            measure="fire_protection_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="mep.fire_protection_parking_sf",
+            unit_cost_value=self.costs["mep"]["fire_protection_parking_sf"],
+            category="mep",
+            description="Fire Protection",
+            source_pass="mep",
+        )
+        total += self._add_cost_line(
+            element_key="mep:plumbing",
+            element_type="mep_component",
+            parent="cost_summary",
+            measure="plumbing_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="mep.plumbing_parking_sf",
+            unit_cost_value=self.costs["mep"]["plumbing_parking_sf"],
+            category="mep",
+            description="Plumbing",
+            source_pass="mep",
+        )
+        total += self._add_cost_line(
+            element_key="mep:hvac",
+            element_type="mep_component",
+            parent="cost_summary",
+            measure="hvac_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="mep.hvac_parking_sf",
+            unit_cost_value=self.costs["mep"]["hvac_parking_sf"],
+            category="mep",
+            description="Mechanical Ventilation",
+            source_pass="mep",
+        )
+        total += self._add_cost_line(
+            element_key="mep:electrical",
+            element_type="mep_component",
+            parent="cost_summary",
+            measure="electrical_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="mep.electrical_parking_sf",
+            unit_cost_value=self.costs["mep"]["electrical_parking_sf"],
+            category="mep",
+            description="Electrical Systems",
+            source_pass="mep",
+        )
+        return total
+
+    def _vdc_costs(self, garage) -> float:
+        return self._add_cost_line(
+            element_key="soft:vdc",
+            element_type="soft_cost_component",
+            parent="cost_summary",
+            measure="vdc_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="component_specific_costs.vdc_coordination_per_sf_building",
+            unit_cost_value=self.component_costs["vdc_coordination_per_sf_building"],
+            category="soft_costs",
+            description="VDC Coordination",
+            source_pass="soft_costs",
+        )
+
+    def _exterior_costs(self, garage) -> float:
+        total = 0.0
+        total += self._add_cost_line(
+            element_key="exterior:screen",
+            element_type="exterior_component",
+            parent="cost_summary",
+            measure="parking_screen_area",
+            quantity=garage.exterior_wall_sf,
+            unit="SF",
+            unit_cost_key="exterior.parking_screen_sf",
+            unit_cost_value=self.costs["exterior"]["parking_screen_sf"],
+            category="exterior",
+            description="Parking Screen",
+            source_pass="exterior",
+        )
+        if hasattr(garage, "high_speed_overhead_door_ea"):
+            total += self._add_cost_line(
+                element_key="exterior:overhead_door",
+                element_type="exterior_component",
+                parent="cost_summary",
+                measure="overhead_doors",
+                quantity=garage.high_speed_overhead_door_ea,
+                unit="EA",
+                unit_cost_key="site.high_speed_overhead_door_ea",
+                unit_cost_value=self.costs["site"]["high_speed_overhead_door_ea"],
+                category="exterior",
+                description="High-speed Overhead Door",
+                source_pass="exterior",
+            )
+        return total
+
+    def _site_finishes_costs(self, garage) -> float:
+        total = 0.0
+        total += self._add_cost_line(
+            element_key="site:sealed_concrete",
+            element_type="site_component",
+            parent="cost_summary",
+            measure="sealed_concrete_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="site.sealed_concrete_parking_sf",
+            unit_cost_value=self.costs["site"]["sealed_concrete_parking_sf"],
+            category="site",
+            description="Sealed Concrete",
+            source_pass="site",
+        )
+        total += self._add_cost_line(
+            element_key="site:pavement_markings",
+            element_type="site_component",
+            parent="cost_summary",
+            measure="pavement_markings",
+            quantity=garage.total_stalls,
+            unit="EA",
+            unit_cost_key="site.pavement_markings_per_stall",
+            unit_cost_value=self.costs["site"]["pavement_markings_per_stall"],
+            category="site",
+            description="Pavement Markings",
+            source_pass="site",
+        )
+        total += self._add_cost_line(
+            element_key="site:final_cleaning",
+            element_type="site_component",
+            parent="cost_summary",
+            measure="final_cleaning_area",
+            quantity=garage.total_gsf,
+            unit="SF",
+            unit_cost_key="site.final_cleaning_parking_sf",
+            unit_cost_value=self.costs["site"]["final_cleaning_parking_sf"],
+            category="site",
+            description="Final Cleaning",
+            source_pass="site",
+        )
+        if hasattr(garage, "oil_water_separator_ea"):
+            total += self._add_cost_line(
+                element_key="site:oil_water_separator",
+                element_type="site_component",
+                parent="cost_summary",
+                measure="oil_water_separator",
+                quantity=garage.oil_water_separator_ea,
+                unit="EA",
+                unit_cost_key="site.oil_water_separator_ea",
+                unit_cost_value=self.costs["site"]["oil_water_separator_ea"],
+                category="site",
+                description="Oil/Water Separator",
+                source_pass="site",
+            )
+        if hasattr(garage, "storm_drain_48in_ads_ea"):
+            total += self._add_cost_line(
+                element_key="site:storm_drain_ads",
+                element_type="site_component",
+                parent="cost_summary",
+                measure="storm_drain_ads",
+                quantity=garage.storm_drain_48in_ads_ea,
+                unit="EA",
+                unit_cost_key="site.storm_drain_48in_ads_ea",
+                unit_cost_value=self.costs["site"]["storm_drain_48in_ads_ea"],
+                category="site",
+                description="Storm Drain (48in ADS)",
+                source_pass="site",
+            )
+        return total
+
+    def _general_conditions(self, hard_cost_total: float, gc_params: Dict[str, Any]) -> float:
+        method = gc_params.get("method", "percentage")
+        if method == "monthly_rate":
+            months = float(gc_params.get("value", 5.0))
+            rate = self.component_costs["general_conditions_per_month"]
+            return self._add_cost_line(
+                element_key="soft:general_conditions_monthly",
+                element_type="soft_cost_component",
+                parent="cost_summary",
+                measure="general_conditions_months",
+                quantity=months,
+                unit="MONTH",
+                unit_cost_key="component_specific_costs.general_conditions_per_month",
+                unit_cost_value=rate,
+                category="soft_costs",
+                description="General Conditions (Monthly)",
+                source_pass="soft_costs",
+            )
+
+        percentage = float(gc_params.get("value", self.component_costs["general_conditions_percentage"]))
+        factor = percentage / 100.0 if percentage > 1 else percentage
+        base = hard_cost_total
+        return self._add_cost_line(
+            element_key="soft:general_conditions_percentage",
+            element_type="soft_cost_component",
+            parent="cost_summary",
+            measure="general_conditions_base",
+            quantity=base,
+            unit="USD",
+            unit_cost_key="component_specific_costs.general_conditions_percentage",
+            unit_cost_value=factor,
+            category="soft_costs",
+            description="General Conditions (% of Hard Costs)",
+            source_pass="soft_costs",
+        )
+
+    def _record_soft_costs(self, summary: Dict[str, float], garage) -> None:
+        base = summary["hard_cost_subtotal"] + summary["general_conditions"]
+
+        self._add_cost_line(
+            element_key="soft:cm_fee",
+            element_type="soft_cost_component",
+            parent="cost_summary",
+            measure="cm_fee_base",
+            quantity=base,
+            unit="USD",
+            unit_cost_key="soft_costs_percentages.cm_fee",
+            unit_cost_value=self.soft_costs_pct["cm_fee"],
+            category="soft_costs",
+            description="Construction Management Fee",
+            source_pass="soft_costs",
+        )
+
+        self._add_cost_line(
+            element_key="soft:insurance",
+            element_type="soft_cost_component",
+            parent="cost_summary",
+            measure="insurance_base",
+            quantity=base,
+            unit="USD",
+            unit_cost_key="soft_costs_percentages.insurance",
+            unit_cost_value=self.soft_costs_pct["insurance"],
+            category="soft_costs",
+            description="Builders Risk Insurance",
+            source_pass="soft_costs",
+        )
+
+        contingency_pct = (
+            self.soft_costs_pct["contingency_cm"] + self.soft_costs_pct["contingency_design"]
+        )
+        self._add_cost_line(
+            element_key="soft:contingency",
+            element_type="soft_cost_component",
+            parent="cost_summary",
+            measure="contingency_base",
+            quantity=base,
+            unit="USD",
+            unit_cost_key="soft_costs_percentages.contingency_cm",
+            unit_cost_value=contingency_pct,
+            category="soft_costs",
+            description="Construction + Design Contingency",
+            source_pass="soft_costs",
+        )
+
+    def _validate_cost_summary(self, summary: Dict[str, float]) -> None:
+        if summary["total"] <= 0:
+            self._warn("Total cost calculated as non-positive value.", {"total": summary["total"]})
+
+
+def load_cost_database(path: Optional[Path] = None) -> Dict[str, Any]:
+    base = path or Path(__file__).resolve().parent.parent / "data" / "cost_database.json"
+    with open(base, "r", encoding="utf-8") as fp:
+        return json.load(fp)
+

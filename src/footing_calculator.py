@@ -31,11 +31,11 @@ class FootingCalculator:
     def __init__(
         self,
         garage: 'SplitLevelParkingGarage',  # String annotation to avoid circular import
-        soil_bearing_capacity: float = 2000,
+        soil_bearing_capacity: float = 3500,
         fc: int = 4000,
         load_factor_dl: float = 1.2,
         load_factor_ll: float = 1.6,
-        allow_ll_reduction: bool = False,
+        allow_ll_reduction: bool = True,
         continuous_footing_rebar_rate: float = 110.0,
         spread_footing_rebar_rate: float = 65.0,
         dead_load_psf: float = 115.0,
@@ -46,11 +46,11 @@ class FootingCalculator:
 
         Args:
             garage: SplitLevelParkingGarage geometry instance
-            soil_bearing_capacity: Allowable bearing pressure (PSF), default 2000
+            soil_bearing_capacity: Allowable bearing pressure (PSF), default 3500
             fc: Concrete compressive strength (PSI), default 4000
             load_factor_dl: Dead load factor (ACI 318-19), default 1.2
             load_factor_ll: Live load factor (ACI 318-19), default 1.6
-            allow_ll_reduction: Enable live load reduction (default False per IBC 2006+)
+            allow_ll_reduction: Enable live load reduction (default True; can be disabled)
             continuous_footing_rebar_rate: Reinforcement rate for continuous footings (lbs/CY), default 110
             spread_footing_rebar_rate: Reinforcement rate for spread footings (lbs/CY), default 65
             dead_load_psf: Dead load per square foot (PSF), default 115 (100 slab + 15 superimposed)
@@ -105,6 +105,21 @@ class FootingCalculator:
         # Minimum footing depth (inches)
         self.min_depth_in = 18
 
+    # ===== Live Load Reduction (Strategy Scaffold) ==================================
+    def _get_reduced_live_load_psf(self, tributary_area_sf: float, floors_supported: float) -> float:
+        """
+        Compute live load (PSF) after reduction.
+        Strategy scaffold:
+        - Default (current): simple 20% reduction when supporting ≥2 equivalent full floors
+        - Future: ASCE 7-16 area-based method for columns (uses tributary area and floors)
+        """
+        if not self.allow_ll_reduction:
+            return self.live_load_psf
+        # Default conservative reduction
+        if floors_supported >= 2.0:
+            return 0.8 * self.live_load_psf
+        return self.live_load_psf
+
     def calculate_column_load(
         self,
         tributary_area: float,
@@ -134,10 +149,8 @@ class FootingCalculator:
         # So total GSF / footprint gives equivalent number of full floors
         equivalent_full_floors = self.garage.total_gsf / self.garage.footprint_sf
 
-        # Apply live load reduction if enabled (max 20% for 2+ floors per IBC)
-        ll_psf = self.live_load_psf
-        if self.allow_ll_reduction and equivalent_full_floors >= 2:
-            ll_psf = self.live_load_psf * 0.8  # 20% reduction
+        # Live load with reduction strategy (scaffold for ASCE 7 method)
+        ll_psf = self._get_reduced_live_load_psf(tributary_area, equivalent_full_floors)
 
         # Service loads (unfactored) - slab only
         # Use equivalent full floors instead of total_levels
@@ -157,23 +170,6 @@ class FootingCalculator:
         # Additional loads for center/ramp columns
         core_wall_weight = 0
         curb_weight = 0
-
-        if column_type == 'center_ramp':
-            # Core wall: 12" (1.0') thick × full height × tributary width
-            # Each center column supports tributary width = column spacing (31')
-            wall_thickness_ft = 1.0
-            wall_height_ft = self.garage.total_height_ft
-            wall_tributary_width = 31.0  # Column spacing
-            wall_volume_cf = wall_thickness_ft * wall_height_ft * wall_tributary_width
-            core_wall_weight = wall_volume_cf * 150  # PCF concrete
-
-            # Curbs: 8" (0.67') × 12" (1.0') × 31' length
-            # Two curbs per center line (east and west side)
-            # Each column supports portion based on spacing
-            curb_volume_cf = (8.0 / 12.0) * 1.0 * 31  # One curb span
-            curb_weight_single = curb_volume_cf * 150  # PCF concrete
-            # Column supports 1.0 curb spans per side × 2 sides per equivalent full floor
-            curb_weight = curb_weight_single * 2.0 * equivalent_full_floors
 
         # Total dead load
         dl_total = dl_slab + column_weight + core_wall_weight + curb_weight
@@ -380,21 +376,174 @@ class FootingCalculator:
         total_depth_in = math.ceil(total_depth_in / 3) * 3
         depth_ft = total_depth_in / 12.0
 
-        # Calculate volumes and costs
-        concrete_cy = (width_ft * width_ft * depth_ft) / 27.0
-        rebar_lbs = concrete_cy * self.spread_rebar_rate  # Use spread footing rate (65 lbs/CY per TechRidge budget)
-        excavation_cy = concrete_cy * 1.2  # 20% over-dig
+        # Branch: Two-depth footing for constructability and efficiency (see user spec)
+        # Conditions where two layers make sense:
+        # - Plan size ≥ 10' × 10'
+        # - Total depth ≥ 12"
+        if width_ft >= 10 and total_depth_in >= 12:
+            return self._design_two_depth_spread_footing(
+                width_ft=width_ft,
+                total_depth_in=total_depth_in,
+                service_load=service_load,
+                factored_load=factored_load,
+                column_type=column_type
+            )
+        else:
+            # Single-thickness footing (small/shallower)
+            concrete_cy = (width_ft * width_ft * depth_ft) / 27.0
+            rebar_lbs = concrete_cy * self.spread_rebar_rate
+            excavation_cy = concrete_cy * 1.2
+            designation = f"FS{width_ft}.0"
+            actual_bearing_pressure = service_load / (width_ft * width_ft)
+            return {
+                'width_ft': width_ft,
+                'depth_ft': depth_ft,
+                'depth_in': total_depth_in,
+                'area_sf': width_ft * width_ft,
+                'concrete_cy': concrete_cy,
+                'rebar_lbs': rebar_lbs,
+                'excavation_cy': excavation_cy,
+                'designation': designation,
+                'service_load': service_load,
+                'factored_load': factored_load,
+                'bearing_pressure': actual_bearing_pressure,
+                'column_type': column_type,
+                'two_depth': False
+            }
 
-        # Designation (e.g., "FS10.0" for 10' square footing)
-        designation = f"FS{width_ft}.0"
+    def _design_two_depth_spread_footing(
+        self,
+        *,
+        width_ft: float,
+        total_depth_in: float,
+        service_load: float,
+        factored_load: float,
+        column_type: str
+    ) -> Dict:
+        """
+        Two-depth footing design:
+        - Outer mat: thinner, full width (B × B)
+        - Drop panel: thicker, centered under column (b_dp × a_dp)
+        Increments:
+          - Plan widths: 1' increments
+          - Drop thickness: 6" increments
+          - Outer mat thickness: 1" increments (min 12")
+        """
+        # Column dimensions (inches)
+        if column_type == 'center_ramp':
+            col_w_in, col_d_in = 32, 24
+        else:
+            col_w_in, col_d_in = 18, 24
 
-        # Actual bearing pressure (verify)
+        # Start with outer mat thickness 12", allow 1" increments if needed
+        t_outer_in = 12
+        t_outer_ft = t_outer_in / 12.0
+
+        # Drop panel target thickness starts from total depth (effective d) minus cover
+        # Round to nearest 6"
+        cover_in = 3
+        d_inner_in = max(total_depth_in - cover_in, 12)  # ≥12" effective
+        d_inner_in = math.ceil(d_inner_in / 6.0) * 6.0
+
+        # Ensure inner total thickness ≥ outer thickness + cover
+        t_inner_in = max(t_outer_in + 6, d_inner_in)  # start with something thicker than outer
+
+        # Drop panel plan dimensions must cover critical sections:
+        # - For punching: perimeter at d/2 from column face lies within drop
+        # - For one-way shear: section at d from column face lies within drop
+        def required_drop_dim_in(d_eff_in: float, col_in: float, margin_in: float = 0.0) -> float:
+            # Minimum total dimension = col + 2×(d/2) = col + d
+            return col_in + d_eff_in + margin_in
+
+        # Round plan dimensions to 1' increments, minimum 4'
+        def round_plan_ft(required_in: float) -> float:
+            ft = required_in / 12.0
+            ft = max(4.0, ft)
+            return math.ceil(ft)  # 1' increments
+
+        # Iterate on drop thickness and drop area until shear checks pass
+        max_drop_thickness_in = 36.0
+        solved = False
+        for t_candidate_in in range(int(t_inner_in), int(max_drop_thickness_in) + 1, 6):
+            # Effective depth d for punching/one-way near column
+            d_eff_in = t_candidate_in - cover_in
+            d_eff_ft = d_eff_in / 12.0
+
+            # Required drop panel dimensions
+            req_x_in = required_drop_dim_in(d_eff_in, col_w_in)
+            req_y_in = required_drop_dim_in(d_eff_in, col_d_in)
+            b_dp_ft = round_plan_ft(req_x_in)
+            a_dp_ft = round_plan_ft(req_y_in)
+
+            # Ensure drop panel fits within outer width
+            b_dp_ft = min(b_dp_ft, width_ft)
+            a_dp_ft = min(a_dp_ft, width_ft)
+
+            # Soil pressure for factored load
+            qu_psf = factored_load / (width_ft * width_ft)
+
+            # Punching capacity using d_eff_in (ACI 22.6.5.2)
+            phi_Vc_punch = self._calculate_punching_shear_capacity(
+                width_ft, d_eff_in, col_w_in, col_d_in, column_type
+            )
+            # Demand: Vu = Pu - q_u × A(within punching perimeter)
+            col_w_ft = col_w_in / 12.0
+            col_d_ft = col_d_in / 12.0
+            punch_area_sf = (col_w_ft + d_eff_ft) * (col_d_ft + d_eff_ft)
+            Vu_punch = factored_load - (qu_psf * punch_area_sf)
+
+            # One-way shear check at d from column face (within drop panel)
+            phi_Vc_oneway = self._calculate_one_way_shear_capacity(width_ft, d_eff_in)
+            cantilever_ft = (width_ft - col_w_ft/12.0) / 2.0 - d_eff_ft
+            Vu_oneway = qu_psf * width_ft * max(cantilever_ft, 0)
+
+            if phi_Vc_punch >= Vu_punch and phi_Vc_oneway >= Vu_oneway:
+                t_inner_in = t_candidate_in
+                solved = True
+                break
+
+        if not solved:
+            # Fallback to single-thickness design if two-depth solution not found within bounds
+            depth_ft = total_depth_in / 12.0
+            concrete_cy = (width_ft * width_ft * depth_ft) / 27.0
+            rebar_lbs = concrete_cy * self.spread_rebar_rate
+            excavation_cy = concrete_cy * 1.2
+            designation = f"FS{width_ft}.0"
+            actual_bearing_pressure = service_load / (width_ft * width_ft)
+            return {
+                'width_ft': width_ft,
+                'depth_ft': depth_ft,
+                'depth_in': total_depth_in,
+                'area_sf': width_ft * width_ft,
+                'concrete_cy': concrete_cy,
+                'rebar_lbs': rebar_lbs,
+                'excavation_cy': excavation_cy,
+                'designation': designation,
+                'service_load': service_load,
+                'factored_load': factored_load,
+                'bearing_pressure': actual_bearing_pressure,
+                'column_type': column_type,
+                'two_depth': False
+            }
+
+        # Volumes (outer mat + drop panel extra thickness)
+        t_inner_ft = t_inner_in / 12.0
+        outer_volume_cf = width_ft * width_ft * t_outer_ft
+        extra_drop_thickness_ft = max(t_inner_ft - t_outer_ft, 0.0)
+        drop_volume_cf = b_dp_ft * a_dp_ft * extra_drop_thickness_ft
+        concrete_cy = (outer_volume_cf + drop_volume_cf) / 27.0
+
+        rebar_lbs = concrete_cy * self.spread_rebar_rate
+        excavation_cy = concrete_cy * 1.2
+        designation = f"FS{width_ft}.0-DP{int(b_dp_ft)}x{int(a_dp_ft)}-{int(t_inner_in)}in/{int(t_outer_in)}in"
         actual_bearing_pressure = service_load / (width_ft * width_ft)
 
         return {
             'width_ft': width_ft,
-            'depth_ft': depth_ft,
-            'depth_in': total_depth_in,
+            'outer_thickness_ft': t_outer_ft,
+            'inner_thickness_ft': t_inner_ft,
+            'drop_width_x_ft': b_dp_ft,
+            'drop_width_y_ft': a_dp_ft,
             'area_sf': width_ft * width_ft,
             'concrete_cy': concrete_cy,
             'rebar_lbs': rebar_lbs,
@@ -403,7 +552,8 @@ class FootingCalculator:
             'service_load': service_load,
             'factored_load': factored_load,
             'bearing_pressure': actual_bearing_pressure,
-            'column_type': column_type
+            'column_type': column_type,
+            'two_depth': True
         }
 
     def _calculate_flexural_moment(
@@ -923,16 +1073,11 @@ class FootingCalculator:
         """
         Calculate all spread footings under columns
 
-        Uses tributary areas based on column spacing (uniform or variable grid)
+        Uses tributary areas based on column classification and spacing.
 
         Returns:
             dict with footing details by type and totals
         """
-        # Get column grid dimensions using dynamic spacing
-        spacing = self.column_spacing_ft
-        columns_width = int(self.garage.width / spacing) + 1
-        columns_length = int(self.garage.length / spacing) + 1
-
         # Initialize storage
         footings_by_type = {
             'corner': [],
@@ -941,28 +1086,33 @@ class FootingCalculator:
             'center_ramp': []
         }
 
-        # Calculate each column footing
-        for i in range(columns_width):
-            for j in range(columns_length):
-                x = j * spacing  # Along length
-                y = i * spacing  # Along width
+        # Prefer authoritative columns list from garage
+        columns = getattr(self.garage, 'columns', [])
+        trib_list = getattr(self.garage, 'column_tributary', [])
+        for idx, c in enumerate(columns):
+            x = float(c['x'])
+            y = float(c['y'])
+            y_line_type = c.get('y_line_type', 'interior')
+            if y_line_type == 'ramp_center':
+                col_type = 'center_ramp'
+            elif y_line_type == 'perimeter':
+                col_type = 'edge'
+            else:
+                # For interior stall/aisle boundaries treat as interior-perimeter
+                col_type = 'interior_perimeter'
 
-                # Classify column
-                col_type = self._classify_column(x, y)
+            # Prefer computed tributary area if available
+            if idx < len(trib_list) and 'area_sf' in trib_list[idx]:
+                tributary_area = max(trib_list[idx]['area_sf'], 0.0)
+            else:
+                tributary_area = self.tributary_areas.get(col_type, self.tributary_areas['interior_perimeter'])
 
-                # Calculate tributary area (uniform grid for now)
-                tributary_area = self.tributary_areas[col_type]
-
-                # Calculate load using actual tributary area
-                load_dict = self.calculate_column_load(tributary_area, col_type)
-
-                # Design footing
-                footing = self.design_spread_footing(load_dict, col_type)
-                footing['x'] = x
-                footing['y'] = y
-                footing['tributary_area'] = tributary_area
-
-                footings_by_type[col_type].append(footing)
+            load_dict = self.calculate_column_load(tributary_area, col_type)
+            footing = self.design_spread_footing(load_dict, col_type)
+            footing['x'] = x
+            footing['y'] = y
+            footing['tributary_area'] = tributary_area
+            footings_by_type[col_type].append(footing)
 
         # Calculate totals
         total_concrete_cy = sum(
@@ -1334,5 +1484,6 @@ class FootingCalculator:
                 'concrete_cy': total_concrete_cy,
                 'rebar_lbs': total_rebar_lbs,
                 'excavation_cy': total_excavation_cy
+           
             }
         }

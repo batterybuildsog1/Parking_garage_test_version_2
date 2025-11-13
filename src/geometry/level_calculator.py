@@ -33,14 +33,14 @@ class DiscreteLevelCalculator:
 
     # Constants (from original geometry.py)
     FLAT_ENTRY_LENGTH = 100  # feet (flat entry circulation zone)
-    RAMP_TERMINATION_LENGTH = 48  # feet (ramp end termination at top)
 
     def __init__(self, footprint_sf: float, width: float, length: float,
                  half_levels_above: int, half_levels_below: int,
                  entry_elevation: float = 0.0,
                  ramp_system: 'RampSystemType' = None,
                  floor_to_floor: float = 10.656,
-                 level_height: float = 5.328):
+                 level_height: float = 5.328,
+                 ramp_termination_length: float = 48.0):
         """
         Initialize level calculator
 
@@ -68,6 +68,7 @@ class DiscreteLevelCalculator:
         self.ramp_system = ramp_system
         self.floor_to_floor = floor_to_floor
         self.level_height = level_height
+        self.ramp_termination_length = ramp_termination_length
 
         # Derived values
         self.total_levels = half_levels_below + 1 + half_levels_above  # +1 for entry
@@ -131,7 +132,7 @@ class DiscreteLevelCalculator:
             if level_index == self.total_levels - 1:
                 # Top level: reduced by ramp termination at north end
                 # Physical structure terminates, so GSF is actually reduced
-                top_effective_length = self.length - self.RAMP_TERMINATION_LENGTH
+                top_effective_length = self.length - self.ramp_termination_length
                 level_gsf = self.width * top_effective_length / 2
             else:
                 # All other levels: standard half-level (~50% of footprint)
@@ -160,6 +161,7 @@ class DiscreteLevelCalculator:
         Calculate discrete GSF for single-ramp (full floor) system
 
         Each full floor has 100% of footprint (all flat bays + ramp bay at same elevation).
+        Ramp termination length reduction is NOT applied for single-ramp in current model.
         """
         levels = []
 
@@ -186,14 +188,8 @@ class DiscreteLevelCalculator:
                 slab_type = "suspended"
 
             # Determine GSF
-            if level_index == self.total_levels - 1:
-                # Top level: reduced by ramp termination at north end
-                # Physical structure terminates, so GSF is actually reduced
-                top_effective_length = self.length - self.RAMP_TERMINATION_LENGTH
-                level_gsf = self.width * top_effective_length
-            else:
-                # All other levels: full floor (100% of footprint)
-                level_gsf = full_floor_gsf
+            # Full floor (100% of footprint) on all levels in single-ramp mode
+            level_gsf = full_floor_gsf
 
             # Add to levels list
             levels.append((level_name, level_gsf, slab_type, elevation))
@@ -338,7 +334,7 @@ class DiscreteLevelCalculator:
         print("=" * 100)
         print(f"Geometry: {self.width:.1f}' × {self.length:.1f}' footprint = {self.footprint_sf:,.0f} SF")
         print(f"Configuration: {self.half_levels_above} half-levels above, {self.half_levels_below} half-levels below")
-        print(f"Parameters: Entry zone={self.FLAT_ENTRY_LENGTH}', Top termination={self.RAMP_TERMINATION_LENGTH}'")
+        print(f"Parameters: Entry zone={self.FLAT_ENTRY_LENGTH}', Top termination={self.ramp_termination_length}'")
         print(f"Entry: Grade at elevation {self.entry_elevation:.2f}'")
         print("\n" + "-" * 100)
         print(f"{'Level':<12} {'Elevation':<12} {'GSF':<15} {'Slab Type':<15} {'% of Footprint':<20} {'Grade':<15}")

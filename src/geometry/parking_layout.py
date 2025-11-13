@@ -51,7 +51,7 @@ class ParkingLayout:
     NOT the physical core wall structures themselves.
     """
 
-    def __init__(self, width: float, length: float, num_bays: int):
+    def __init__(self, width: float, length: float, num_bays: int, turn_zone_depth: float = None):
         """
         Initialize parking layout
 
@@ -65,7 +65,7 @@ class ParkingLayout:
         self.num_bays = num_bays
         self.sections = []
         self.cores = []
-        self.turn_zone_depth = 48  # feet (30' turn + 18' end parking)
+        self.turn_zone_depth = 48 if turn_zone_depth is None else float(turn_zone_depth)  # feet (30' turn + 18' end parking)
 
         self._initialize_cores()
         self._create_sections()

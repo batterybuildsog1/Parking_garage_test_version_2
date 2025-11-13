@@ -2,16 +2,11 @@
 3D Visualization engine for split-level parking garage
 
 Generates interactive Plotly 3D models showing:
-- Sloped floor slabs (THE slabs ARE the ramps at 5% slope)
-- Discrete level geometry (half-levels at 50% footprint)
-- Structural column grid
-- Core walls (ramp bay dividers)
+- Sloped floor slabs (the slabs ARE the ramps at 5% slope)
+- Discrete level geometry (half-levels at ~50% footprint)
+- Structural columns (from the authoritative generator)
+- Ramp edge barriers (visual divider between ramp bays)
 - Optional circulation path visualization
-
-**CRITICAL UNDERSTANDING:**
-In split-level parking, the FLOOR SLABS themselves form the ramping surface.
-There is NO separate "ramp" structure - slabs continuously slope at 5%.
-At any given elevation, multiple sloping slabs intersect creating discrete parking levels.
 
 Optimized for performance with trace consolidation and caching.
 Designed for Streamlit integration with interactive controls.
@@ -20,7 +15,7 @@ Designed for Streamlit integration with interactive controls.
 import plotly.graph_objects as go
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-from .garage import SplitLevelParkingGarage
+from .garage import ParkingGarage
 
 
 # ===== COLOR PALETTE =====
@@ -89,7 +84,7 @@ CAMERA_PRESETS = {
 
 # ===== HELPER FUNCTIONS =====
 
-def normalize_coordinates(garage: SplitLevelParkingGarage, x: float, y: float, z: float) -> Tuple[float, float, float]:
+def normalize_coordinates(garage: ParkingGarage, x: float, y: float, z: float) -> Tuple[float, float, float]:
     """
     Normalize coordinates to 0-1 range for camera positioning
 
@@ -176,10 +171,11 @@ def create_sloped_surface_mesh(x_start: float, x_end: float,
 
 # ===== MAIN VISUALIZATION FUNCTIONS =====
 
-def create_sloped_slabs(garage: SplitLevelParkingGarage,
+def create_sloped_slabs(garage: ParkingGarage,
                        show_half_levels: bool = True,
                        color_by_elevation: bool = True,
-                       simplify: bool = False) -> List[go.Mesh3d]:
+                       simplify: bool = False,
+                       allowed_level_indices: Optional[set] = None) -> List[go.Mesh3d]:
     """
     Create CONTINUOUS HELICAL SLOPED slabs that form the ramping parking surface
 
@@ -204,56 +200,53 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
     traces = []
     slab_thickness = 0.67  # 8" thick slabs = 0.67 feet
 
+    # Simplified mode: render flat plates at each discrete level (no helical slope)
+    if simplify:
+        total_levels = garage.total_levels
+        for level_idx in range(total_levels):
+            if allowed_level_indices is not None and level_idx not in allowed_level_indices:
+                continue
+            if getattr(garage, 'is_half_level_system', True) and not show_half_levels and (level_idx % 2 == 1):
+                continue
+            z = garage.levels[level_idx][3] - garage.depth_below_grade_ft
+            # Color by elevation gradient
+            if color_by_elevation:
+                ratio = level_idx / total_levels if total_levels > 1 else 0.5
+                low_rgb = (180, 150, 120)
+                high_rgb = (150, 170, 190)
+                r = int(low_rgb[0] + (high_rgb[0] - low_rgb[0]) * ratio)
+                g = int(low_rgb[1] + (high_rgb[1] - low_rgb[1]) * ratio)
+                b = int(low_rgb[2] + (high_rgb[2] - low_rgb[2]) * ratio)
+                color = f'rgb({r}, {g}, {b})'
+            else:
+                color = COLORS['slab_suspended']
+            level_name = garage.get_level_name(level_idx)
+            flat_trace = create_sloped_surface_mesh(
+                0, garage.length,
+                0, garage.width,
+                z, z,
+                color=color,
+                name=f'{level_name} (Flat)',
+                opacity=0.6,
+                thickness=slab_thickness
+            )
+            traces.append(flat_trace)
+        return traces
+
     # Get key dimensions
     turn_zone = garage.TURN_ZONE_DEPTH  # 48' flat zones at each end
     ramp_length = garage.length - (2 * turn_zone)  # Sloping section length
     slope = garage.RAMP_SLOPE  # 5% = 0.05
-    floor_to_floor = garage.FLOOR_TO_FLOOR  # 10.656'
+    floor_to_floor = garage.floor_to_floor  # instance-specific
 
     # Calculate bay widths (each bay is one half of the total width minus core walls)
     # For 2 bays: each bay is approximately width/2
     bay_width = garage.width / garage.num_bays
 
-    # SPECIAL CASE: P0.5 (Ground Floor) - Entirely FLAT with north entrance cutout
-    # North entrance: 30' wide centered opening at X = garage.length (north edge)
-    # No ramping occurs on P0.5 - it's all circulation at z = 0
-
-    entrance_width = 30.0  # feet
-    entrance_y_center = garage.width / 2
-    entrance_y_start = entrance_y_center - (entrance_width / 2)
-    entrance_y_end = entrance_y_center + (entrance_width / 2)
-
-    # P0.5 ground floor (level_idx == 0)
-    z_p05 = 0 if garage.half_levels_below == 0 else -garage.depth_below_grade_ft
+    # P0.5 elevation from discrete levels
+    entry_index = getattr(garage, 'entry_level_index', 0)
+    z_p05 = garage.levels[entry_index][3] - garage.depth_below_grade_ft
     color_p05 = COLORS['slab_sog']  # Ground floor is slab-on-grade
-
-    # Create P0.5 slabs with entrance cutout
-    # North turn zone with entrance opening (X = length-turn_zone to X = length)
-    # Split into west and east segments around entrance
-
-    # North west of entrance
-    trace_north_w = create_sloped_surface_mesh(
-        garage.length - turn_zone, garage.length,
-        0, entrance_y_start,  # West of entrance
-        z_p05, z_p05,  # Flat
-        color=color_p05,
-        name='P0.5 North Turn (West)',
-        opacity=0.7,
-        thickness=slab_thickness
-    )
-    traces.append(trace_north_w)
-
-    # North east of entrance
-    trace_north_e = create_sloped_surface_mesh(
-        garage.length - turn_zone, garage.length,
-        entrance_y_end, garage.width,  # East of entrance
-        z_p05, z_p05,  # Flat
-        color=color_p05,
-        name='P0.5 North Turn (East)',
-        opacity=0.7,
-        thickness=slab_thickness
-    )
-    traces.append(trace_north_e)
 
     # Middle sections - both bays FLAT on P0.5
     for bay_idx in range(garage.num_bays):
@@ -269,7 +262,8 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
             opacity=0.7,
             thickness=slab_thickness
         )
-        traces.append(trace_middle)
+        if allowed_level_indices is None or entry_index in allowed_level_indices:
+            traces.append(trace_middle)
 
     # South turn zone - FLAT on P0.5
     trace_south_p05 = create_sloped_surface_mesh(
@@ -281,7 +275,21 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
         opacity=0.7,
         thickness=slab_thickness
     )
-    traces.append(trace_south_p05)
+    if allowed_level_indices is None or entry_index in allowed_level_indices:
+        traces.append(trace_south_p05)
+
+    # North turn zone - FLAT on P0.5 (no entrance cutout)
+    trace_north_p05 = create_sloped_surface_mesh(
+        garage.length - turn_zone, garage.length,
+        0, garage.width,
+        z_p05, z_p05,  # Flat
+        color=color_p05,
+        name='P0.5 North Turn',
+        opacity=0.7,
+        thickness=slab_thickness
+    )
+    if allowed_level_indices is None or entry_index in allowed_level_indices:
+        traces.append(trace_north_p05)
 
     # NOW create helical ramp slabs for levels P1 and above
     # Starting from level_idx = 1 (NOT 0, since we handled P0.5 above)
@@ -291,23 +299,23 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
         y_start = bay_idx * bay_width
         y_end = (bay_idx + 1) * bay_width
 
-        # Start from level 1 (P1) since P0.5 is handled above
-        for level_idx in range(1, garage.total_levels + 1):
-            # Calculate elevations for this segment
-            z_start = level_idx * floor_to_floor - garage.depth_below_grade_ft
-            z_end = (level_idx + 1) * floor_to_floor - garage.depth_below_grade_ft
+        # Iterate discrete levels above entry (P0.5 handled above)
+        for level_idx in range(garage.total_levels):
+            if level_idx == entry_index:
+                continue
+            # Skip if this level index is not allowed
+            if allowed_level_indices is not None and level_idx not in allowed_level_indices:
+                continue
+            # Skip half-levels if not showing them (no name parsing)
+            if getattr(garage, 'is_half_level_system', True) and not show_half_levels and (level_idx % 2 == 1):
+                continue
+
+            # Elevations from discrete levels
+            z_start = garage.levels[level_idx][3] - garage.depth_below_grade_ft
+            z_end = z_start + getattr(garage, 'level_height', floor_to_floor / 2.0)
 
             # Determine level name for this segment
             level_name = garage.get_level_name(level_idx)
-            level_num = float(level_name.replace('P', ''))
-
-            # Skip half-levels if not showing them
-            if not show_half_levels and (level_num % 1.0) != 0:
-                continue
-
-            # Skip if this is beyond the top level
-            if level_idx >= garage.total_levels:
-                break
 
             # Determine color
             if color_by_elevation:
@@ -348,8 +356,8 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
                 traces.append(trace_south)
 
             # 2. Middle ramping section (SLOPED at 5%)
-            # This section rises by half the floor-to-floor height
-            rise = (floor_to_floor / 2) * slope_direction
+            # This section rises by one half-level height
+            rise = (getattr(garage, 'level_height', floor_to_floor / 2.0)) * slope_direction
             z_south_ramp = z_start
             z_north_ramp = z_start + rise
 
@@ -380,10 +388,10 @@ def create_sloped_slabs(garage: SplitLevelParkingGarage,
     return traces
 
 
-def create_structural_columns(garage: SplitLevelParkingGarage,
+def create_structural_columns(garage: ParkingGarage,
                               consolidate: bool = True) -> go.Scatter3d:
     """
-    Create structural column grid on 31' spacing
+    Create structural columns from the authoritative positions (≤31' spans)
 
     Consolidates all columns into single Scatter3d trace for performance.
     Columns extend from bottom of excavation to top of structure.
@@ -444,17 +452,9 @@ def create_structural_columns(garage: SplitLevelParkingGarage,
         return traces
 
 
-def create_core_walls(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
+def create_core_walls(garage: ParkingGarage) -> List[go.Mesh3d]:
     """
-    Create center columns, spandrel beams, and curbs that divide ramp bays
-
-    REPLACES old solid wall design with beam-on-column system:
-    - 32" × 24" columns at 31' spacing (larger than perimeter 18" × 24")
-    - 32" × 8" spandrel beams between columns (structural + vehicle barrier)
-    - 12" × 12" curbs on west/east sides (wheel stops protect beams)
-
-    CRITICAL: Center elements ONLY in RAMP sections (NOT through turn zones)
-    Number of center lines = num_bays - 1 (one line between each bay pair)
+    Render ramp edge barriers (visual separation at ramp bay centerlines).
 
     Args:
         garage: Garage geometry object
@@ -464,171 +464,38 @@ def create_core_walls(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
     """
     traces = []
 
-    # Get center element data from geometry
+    # Only ramp edge barriers are rendered here; columns are handled separately
     geom_data = garage.get_3d_geometry()
-    center_columns = geom_data.get('center_columns', [])
-    center_beams = geom_data.get('center_beams', [])
-    center_curbs = geom_data.get('center_curbs', [])
+    ramp_edge_barriers = geom_data.get('ramp_edge_barriers', [])
 
-    # === CENTER COLUMNS (32" × 24" - larger than perimeter) ===
-    for col_idx, col_data in enumerate(center_columns):
-        x = col_data['x']
-        y = col_data['y']
-        width = col_data['width']  # 2.67' (32")
-        depth = col_data['depth']  # 2.0' (24")
-        z_bottom = col_data['z_bottom']
-        z_top = col_data['z_top']
+    # === RAMP EDGE BARRIERS (rendered white) ===
+    for rb_idx, rb in enumerate(ramp_edge_barriers):
+        x_start = rb['x_start']
+        x_end = rb['x_end']
+        y_start = rb['y_start']
+        y_end = rb['y_end']
+        z_bottom = rb['z_bottom']
+        z_top = rb['z_top']
 
-        # Create column box (centered on x, y)
-        trace_column = create_sloped_surface_mesh(
-            x - depth/2, x + depth/2,  # X extent (24" depth)
-            y - width/2, y + width/2,  # Y extent (32" width)
-            z_bottom, z_bottom,  # Flat base
-            color='rgb(100, 100, 120)',  # Darker gray/blue for center columns
-            name=f'Center Column {col_idx+1}',
+        barrier_height = z_top - z_bottom
+        trace_rb = create_sloped_surface_mesh(
+            x_start, x_end,
+            y_start, y_end,
+            z_bottom, z_bottom,
+            color='rgb(255, 255, 255)',  # White ramp barriers per updated spec
+            name=f'Ramp Edge Barrier {rb_idx+1}',
             opacity=0.9,
-            thickness=z_top - z_bottom  # Full height
+            thickness=barrier_height
         )
-        traces.append(trace_column)
-
-    # === CENTER SPANDREL BEAMS (32" × 8") ===
-    for beam_idx, beam_data in enumerate(center_beams):
-        x_start = beam_data['x_start']
-        x_end = beam_data['x_end']
-        y_center = beam_data['y_center']
-        beam_width = beam_data['width']  # 0.67' (8")
-        beam_height = beam_data['height']  # 2.67' (32")
-        z_bottom = beam_data['z_bottom']
-
-        # Spandrel beam (horizontal beam between columns at floor level)
-        trace_beam = create_sloped_surface_mesh(
-            x_start, x_end,
-            y_center - beam_width/2, y_center + beam_width/2,  # 8" wide beam
-            z_bottom, z_bottom,  # At floor level
-            color='rgb(140, 120, 100)',  # Tan/brown for structural beams
-            name=f'Spandrel Beam {beam_idx+1}',
-            opacity=0.85,
-            thickness=beam_height  # 32" tall (above floor)
-        )
-        traces.append(trace_beam)
-
-    # === CENTER CURBS (12" × 12" wheel stops) ===
-    for curb_idx, curb_data in enumerate(center_curbs):
-        x_start = curb_data['x_start']
-        x_end = curb_data['x_end']
-        y_west = curb_data['y_west']
-        y_east = curb_data['y_east']
-        curb_width = curb_data['curb_width']  # 1.0' (12")
-        curb_height = curb_data['curb_height']  # 1.0' (12")
-        z_bottom = curb_data['z_bottom']
-
-        # WEST CURB (12" × 12")
-        trace_curb_west = create_sloped_surface_mesh(
-            x_start, x_end,
-            y_west, y_west + curb_width,  # 1' wide
-            z_bottom, z_bottom,  # At floor level
-            color='rgb(160, 160, 160)',  # Light gray for curbs
-            name=f'Center Curb {curb_idx+1} West',
-            opacity=0.7,
-            thickness=curb_height  # 12" tall
-        )
-        traces.append(trace_curb_west)
-
-        # EAST CURB (12" × 12")
-        trace_curb_east = create_sloped_surface_mesh(
-            x_start, x_end,
-            y_east, y_east + curb_width,  # 1' wide
-            z_bottom, z_bottom,  # At floor level
-            color='rgb(160, 160, 160)',  # Light gray for curbs
-            name=f'Center Curb {curb_idx+1} East',
-            opacity=0.7,
-            thickness=curb_height  # 12" tall
-        )
-        traces.append(trace_curb_east)
+        traces.append(trace_rb)
 
     return traces
 
 
-def create_north_entrance(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
-    """
-    Create north entrance opening with DOWN ramp from street to P0.5
-
-    Street level entrance: z = 0 (grade)
-    P0.5 parking level: z = -depth_below_grade (typically -10.66')
-    Ramp slopes DOWN from north (street) to parking level
-
-    Args:
-        garage: Garage geometry object
-
-    Returns:
-        List of Mesh3d traces for entrance ramp and walls
-    """
-    traces = []
-
-    # Entrance parameters
-    entrance_width = 30.0  # feet
-    entrance_y_center = garage.width / 2
-    entrance_y_start = entrance_y_center - (entrance_width / 2)
-    entrance_y_end = entrance_y_center + (entrance_width / 2)
-
-    # Elevations
-    street_grade = 0.0  # Street level at grade
-    p05_level = -garage.depth_below_grade_ft  # P0.5 below grade
-
-    # Entrance ramp extends from street down to P0.5
-    # 10% slope for entrance ramp (max per code)
-    vertical_drop = abs(street_grade - p05_level)  # ~10.66'
-    entrance_slope = 0.10  # 10%
-    ramp_length = vertical_drop / entrance_slope  # ~107' for 10.66' drop
-
-    # Ramp starts at building north edge and extends outward
-    ramp_x_start = garage.length  # North edge of building
-    ramp_x_end = garage.length + ramp_length  # Extends north from building
-
-    # DOWN ramp surface (slopes from street grade down to P0.5)
-    trace_ramp = create_sloped_surface_mesh(
-        ramp_x_start, ramp_x_end,
-        entrance_y_start, entrance_y_end,
-        p05_level, street_grade,  # Slopes UP from building to street
-        color='rgb(90, 90, 90)',  # Dark gray for entrance ramp
-        name='Entrance Down Ramp',
-        opacity=0.8,
-        thickness=0.67  # 8" thick
-    )
-    traces.append(trace_ramp)
-
-    # Side walls along entrance
-    wall_height = 4.0  # 4' tall
-    wall_thickness = 0.5  # 6" thick
-
-    # West side wall
-    trace_wall_w = create_sloped_surface_mesh(
-        ramp_x_start, ramp_x_end,
-        entrance_y_start - wall_thickness, entrance_y_start,
-        p05_level, street_grade,  # Matches ramp slope
-        color='rgb(110, 110, 110)',
-        name='Entrance West Wall',
-        opacity=0.7,
-        thickness=wall_height
-    )
-    traces.append(trace_wall_w)
-
-    # East side wall
-    trace_wall_e = create_sloped_surface_mesh(
-        ramp_x_start, ramp_x_end,
-        entrance_y_end, entrance_y_end + wall_thickness,
-        p05_level, street_grade,  # Matches ramp slope
-        color='rgb(110, 110, 110)',
-        name='Entrance East Wall',
-        opacity=0.7,
-        thickness=wall_height
-    )
-    traces.append(trace_wall_e)
-
-    return traces
+# Entrance ramp rendering removed to align with authoritative entry blockage logic (no separate ramp mesh)
 
 
-def create_corner_cores(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
+def create_corner_cores(garage: ParkingGarage) -> List[go.Mesh3d]:
     """
     Create corner cores with proper distinction between:
     - Actual structural walls (elevator shaft, stair enclosures)
@@ -680,6 +547,7 @@ def create_corner_cores(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
     # === SE STAIR CORE ===
     # 18' × 27' stair enclosure at northeast corner
     # Position: northeast corner = (length-27, width-18) to (length, width)
+    # Extend stair enclosure one full floor above top parking for roof access
     trace_se_stair = create_sloped_surface_mesh(
         garage.length - 27, garage.length,  # X: 27' from north edge
         garage.width - 18, garage.width,  # Y: 18' from east edge
@@ -687,7 +555,7 @@ def create_corner_cores(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
         color='rgb(80, 80, 100)',  # Dark blue-gray (concrete stair)
         name='SE Stair Enclosure',
         opacity=0.8,
-        thickness=z_top - z_bottom
+        thickness=(z_top - z_bottom) + garage.floor_to_floor
     )
     traces.append(trace_se_stair)
 
@@ -770,7 +638,7 @@ def create_corner_cores(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
     return traces
 
 
-def create_safety_barriers(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
+def create_safety_barriers(garage: ParkingGarage) -> List[go.Mesh3d]:
     """
     Create perimeter safety barriers and edge protection
 
@@ -788,62 +656,65 @@ def create_safety_barriers(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
     barrier_height = 3.0  # 36" (exceeds 33" code min)
     barrier_thickness = 0.5  # 6"
 
-    # Create barriers on all levels
-    for level_idx in range(garage.total_levels + 1):
-        z_base = level_idx * garage.FLOOR_TO_FLOOR - garage.depth_below_grade_ft
+    # Only render top-level perimeter barrier for standalone garages
+    if getattr(garage, 'building_type', 'standalone') != 'standalone':
+        return traces
 
-        # North barrier (full width)
-        trace_n = create_sloped_surface_mesh(
-            garage.length - barrier_thickness, garage.length,
-            0, garage.width,
-            z_base, z_base,
-            color='rgb(180, 180, 180)',  # Light gray
-            name=f'L{level_idx} North Barrier',
-            opacity=0.5,
-            thickness=barrier_height
-        )
-        traces.append(trace_n)
+    level_idx = garage.total_levels
+    z_base = level_idx * garage.floor_to_floor - garage.depth_below_grade_ft
 
-        # South barrier (full width)
-        trace_s = create_sloped_surface_mesh(
-            0, barrier_thickness,
-            0, garage.width,
-            z_base, z_base,
-            color='rgb(180, 180, 180)',
-            name=f'L{level_idx} South Barrier',
-            opacity=0.5,
-            thickness=barrier_height
-        )
-        traces.append(trace_s)
+    # North barrier (full width)
+    trace_n = create_sloped_surface_mesh(
+        garage.length - barrier_thickness, garage.length,
+        0, garage.width,
+        z_base, z_base,
+        color='rgb(180, 180, 180)',  # Light gray
+        name=f'L{level_idx} North Barrier',
+        opacity=0.5,
+        thickness=barrier_height
+    )
+    traces.append(trace_n)
 
-        # West barrier (full length)
-        trace_w = create_sloped_surface_mesh(
-            0, garage.length,
-            0, barrier_thickness,
-            z_base, z_base,
-            color='rgb(180, 180, 180)',
-            name=f'L{level_idx} West Barrier',
-            opacity=0.5,
-            thickness=barrier_height
-        )
-        traces.append(trace_w)
+    # South barrier (full width)
+    trace_s = create_sloped_surface_mesh(
+        0, barrier_thickness,
+        0, garage.width,
+        z_base, z_base,
+        color='rgb(180, 180, 180)',
+        name=f'L{level_idx} South Barrier',
+        opacity=0.5,
+        thickness=barrier_height
+    )
+    traces.append(trace_s)
 
-        # East barrier (full length)
-        trace_e = create_sloped_surface_mesh(
-            0, garage.length,
-            garage.width - barrier_thickness, garage.width,
-            z_base, z_base,
-            color='rgb(180, 180, 180)',
-            name=f'L{level_idx} East Barrier',
-            opacity=0.5,
-            thickness=barrier_height
-        )
-        traces.append(trace_e)
+    # West barrier (full length)
+    trace_w = create_sloped_surface_mesh(
+        0, garage.length,
+        0, barrier_thickness,
+        z_base, z_base,
+        color='rgb(180, 180, 180)',
+        name=f'L{level_idx} West Barrier',
+        opacity=0.5,
+        thickness=barrier_height
+    )
+    traces.append(trace_w)
+
+    # East barrier (full length)
+    trace_e = create_sloped_surface_mesh(
+        0, garage.length,
+        garage.width - barrier_thickness, garage.width,
+        z_base, z_base,
+        color='rgb(180, 180, 180)',
+        name=f'L{level_idx} East Barrier',
+        opacity=0.5,
+        thickness=barrier_height
+    )
+    traces.append(trace_e)
 
     return traces
 
 
-def create_top_level_features(garage: SplitLevelParkingGarage) -> List[go.Mesh3d]:
+def create_top_level_features(garage: ParkingGarage) -> List[go.Mesh3d]:
     """
     Create top level ramp termination and closure walls
 
@@ -867,7 +738,7 @@ def create_top_level_features(garage: SplitLevelParkingGarage) -> List[go.Mesh3d
     bay_width = garage.width / garage.num_bays
 
     # Closure at north end where ramps terminate
-    closure_x = garage.TURN_ZONE_DEPTH
+    closure_x = garage.length - garage.TURN_ZONE_DEPTH
 
     # Create closure across each bay
     for bay in range(garage.num_bays):
@@ -888,7 +759,7 @@ def create_top_level_features(garage: SplitLevelParkingGarage) -> List[go.Mesh3d
     return traces
 
 
-def create_circulation_paths(garage: SplitLevelParkingGarage,
+def create_circulation_paths(garage: ParkingGarage,
                             resolution: int = 100) -> List[go.Scatter3d]:
     """
     Create OPTIONAL visualization of circulation paths through the garage
@@ -912,12 +783,12 @@ def create_circulation_paths(garage: SplitLevelParkingGarage,
 
     # Number of circulation paths = num_bays (one per bay)
     num_bays = garage.num_bays
+    bay_width = garage.width / num_bays
 
     # For each bay, create circulation centerline showing 5% slope
     for bay in range(num_bays):
-        # Bay centerline Y position
-        # Bay 0: 0.5' wall + 18' + 12.5' (half of 25' aisle) = 31'
-        bay_y_center = 0.5 + 18 + 12.5 + bay * (61 + garage.CORE_WALL_THICKNESS)
+        # Bay centerline Y position (simple partition matching slab generation)
+        bay_y_center = bay * bay_width + (bay_width / 2.0)
 
         # Create path along length (straight sections)
         x_path = np.linspace(garage.TURN_ZONE_DEPTH,
@@ -1012,17 +883,19 @@ def setup_camera(fig: go.Figure, preset: str = 'isometric',
     return fig
 
 
-def create_3d_parking_garage(garage: SplitLevelParkingGarage,
+def create_3d_parking_garage(garage: ParkingGarage,
                               show_slabs: bool = True,
                               show_columns: bool = True,
                               show_walls: bool = True,
+                              show_footings: bool = True,
                               show_circulation: bool = False,
                               show_half_levels: bool = True,
                               show_barriers: bool = True,
                               show_cores: bool = True,
                               show_entrance: bool = True,
                               floor_range: Optional[Tuple[float, float]] = None,
-                              camera_preset: str = 'isometric') -> go.Figure:
+                              camera_preset: str = 'isometric',
+                              simplify_slabs: bool = False) -> go.Figure:
     """
     Create complete 3D visualization of parking garage
 
@@ -1049,19 +922,28 @@ def create_3d_parking_garage(garage: SplitLevelParkingGarage,
 
     # Add floor slabs (THE RAMPS)
     if show_slabs:
-        slab_traces = create_sloped_slabs(garage, show_half_levels=show_half_levels)
-
-        # Filter by floor range if specified
+        # Determine allowed discrete level indices based on floor_range without name parsing
+        allowed_indices = None
         if floor_range:
             min_level, max_level = floor_range
-            filtered_slabs = []
-            for trace in slab_traces:
-                # Extract level number from trace name
-                level_str = trace.name.split()[0]  # "P0.5" from "P0.5 (SOG, 13860 SF)"
-                level_num = float(level_str.replace('P', ''))
-                if min_level <= level_num <= max_level:
-                    filtered_slabs.append(trace)
-            slab_traces = filtered_slabs
+            allowed = set()
+            entry_idx = getattr(garage, 'entry_level_index', 0)
+            is_half_level_system = getattr(garage, 'is_half_level_system', True)
+            for i in range(garage.total_levels):
+                d = i - entry_idx
+                if d <= 0:
+                    continue  # only above-grade levels
+                val = (d / 2.0) if is_half_level_system else d
+                if min_level <= val <= max_level:
+                    allowed.add(i)
+            allowed_indices = allowed
+
+        slab_traces = create_sloped_slabs(
+            garage,
+            show_half_levels=show_half_levels,
+            simplify=simplify_slabs,
+            allowed_level_indices=allowed_indices
+        )
 
         for trace in slab_traces:
             fig.add_trace(trace)
@@ -1076,6 +958,26 @@ def create_3d_parking_garage(garage: SplitLevelParkingGarage,
         wall_traces = create_core_walls(garage)
         for trace in wall_traces:
             fig.add_trace(trace)
+
+    # Add footings (outer mat + drop panel if present)
+    if show_footings:
+        geom = garage.get_3d_geometry()
+        for f in geom.get('footings', []):
+            x0, x1 = f['x0'], f['x1']
+            y0, y1 = f['y0'], f['y1']
+            z_top = f['z_top']
+            thickness = f['thickness_ft']
+            color = 'rgb(180, 170, 160)' if f['type'] == 'outer' else 'rgb(150, 140, 130)'
+            name = 'Footing (outer)' if f['type'] == 'outer' else 'Footing (drop)'
+            trace_f = create_sloped_surface_mesh(
+                x0, x1, y0, y1,
+                z_top - thickness, z_top - thickness,  # base plane
+                color=color,
+                name=name,
+                opacity=0.9,
+                thickness=thickness
+            )
+            fig.add_trace(trace_f)
 
     # Add optional circulation path visualization
     if show_circulation:
@@ -1100,11 +1002,7 @@ def create_3d_parking_garage(garage: SplitLevelParkingGarage,
         for trace in top_traces:
             fig.add_trace(trace)
 
-    # Add north entrance with down ramp
-    if show_entrance:
-        entrance_traces = create_north_entrance(garage)
-        for trace in entrance_traces:
-            fig.add_trace(trace)
+    # Entrance ramp rendering removed (kept geometry consistent with entry blockage rules)
 
     # Configure camera and scene
     fig = setup_camera(fig, preset=camera_preset, aspect_mode='data')

@@ -1,5 +1,5 @@
 """
-Geometry engine for split-level parking garage
+Geometry engine for parking garages (split-level and single-ramp)
 
 Handles parametric calculations for:
 - Building dimensions and footprint
@@ -16,6 +16,12 @@ Each level (P0.5, P1, P1.5, etc.) has individually calculated Gross Floor Area (
 - Full levels (P1, P2, etc.): 100% footprint
 
 See DISCRETE_LEVELS_GUIDE.md for comprehensive documentation.
+
+AUTHORITATIVE COLUMNS (updated):
+- Columns are generated along stall/aisle boundaries and ramp centerlines with
+  maximum 31' spans along length. This replaces any legacy uniform-grid logic.
+- Center column synthesis for 3D has been removed; all columns come from the
+  authoritative generator. Ramp edge barriers remain for visualization only.
 """
 
 import json
@@ -26,9 +32,20 @@ import math
 # Import from geometry package
 from .geometry.parking_layout import ParkingLayout
 from .geometry.level_calculator import DiscreteLevelCalculator
+from .structure.column_generator import generate_columns
+from .loads.tributary import compute_column_tributaries_and_loads
+from .loads.tributary import compute_per_level_column_areas_and_loads
+from .checks.punching import compute_slab_punching_for_level
 
 # Explicit exports for external use
-__all__ = ['SplitLevelParkingGarage', 'ParkingLayout', 'load_cost_database', 'compute_width_ft']
+__all__ = [
+    'SplitLevelParkingGarage',
+    'ParkingLayout',
+    'load_cost_database',
+    'compute_width_ft',
+    'ParkingGarage',
+    'create_parking_garage'
+]
 
 
 class SplitLevelParkingGarage:
@@ -49,9 +66,9 @@ class SplitLevelParkingGarage:
     STALL_DEPTH = 18  # feet (parallel to aisle)
     DRIVE_AISLE_WIDTH = 25  # feet
     PARKING_MODULE_WIDTH = 61  # feet (18 + 25 + 18)
-    CENTER_SPACING = 3  # feet (spacing between ramp bays: 1' curb + 1' wall + 1' curb)
-    # NOTE: Split-level uses 12" solid concrete core walls, single-ramp has no center elements
-    EXTERIOR_WALL_THICKNESS = 0.5  # feet (6 inches each side)
+    CENTER_SPACING = 2  # feet (center divider = two 12" parking barriers, no curbs)
+    # NOTE: Both systems use ramp edge barriers + center columns; no center walls
+    EXTERIOR_WALL_THICKNESS = 1.0  # feet (12" exterior parking barrier thickness used in width)
 
     # Turn zone geometry at ramp ends
     # Physical layout at north/south ends where ramps reverse direction:
@@ -108,7 +125,7 @@ class SplitLevelParkingGarage:
     # - Structural design (ramp termination details)
     #
     # NOTE: Reference design shows ~54' per side; default 30' is conservative
-    RAMP_TERMINATION_LENGTH = 30  # feet (flat zone where ramps end - DEFAULT, adjust as needed)
+    RAMP_TERMINATION_LENGTH = 48  # feet (flat zone where ramps end - aligned with turn zone depth)
 
     # Excavation design parameters (for below-grade construction)
     # These are design parameters, not site-specific. Actual depths should be verified by geotechnical engineer.
@@ -117,16 +134,17 @@ class SplitLevelParkingGarage:
 
     def __init__(self, length: float, half_levels_above: int, half_levels_below: int, num_bays: int = 2,
                  max_height_ft: float = None,
-                 soil_bearing_capacity: float = 2000,
+                 soil_bearing_capacity: float = 3500,
                  fc: int = 4000,
                  load_factor_dl: float = 1.2,
                  load_factor_ll: float = 1.6,
-                 allow_ll_reduction: bool = False,
+                 allow_ll_reduction: bool = True,
                  continuous_footing_rebar_rate: float = 110.0,
                  spread_footing_rebar_rate: float = 65.0,
                  dead_load_psf: float = 115.0,
                  live_load_psf: float = 50.0,
                  ramp_system = None,
+                 ramp_termination_length: float = None,
                  building_type: str = 'standalone'):
         """
         Initialize parking garage with given dimensions
@@ -175,6 +193,14 @@ class SplitLevelParkingGarage:
         self.level_height = ramp_config['level_height']
         self.ramp_slope = ramp_config['ramp_slope']
         self.is_half_level_system = ramp_config['is_half_level']
+        # Centralized geometry parameters (instance overrides for consistency)
+        self.TURN_ZONE_DEPTH = ramp_config.get('turn_zone_depth', getattr(self, 'TURN_ZONE_DEPTH', 48))
+        self.ENTRY_WIDTH = ramp_config.get('entry_width', getattr(self, 'ENTRY_WIDTH', 27))
+        self.FLAT_ENTRY_LENGTH = ramp_config.get('flat_entry_length', getattr(self, 'FLAT_ENTRY_LENGTH', 100))
+        self.RAMP_TERMINATION_LENGTH = ramp_config.get('ramp_termination_length', getattr(self, 'RAMP_TERMINATION_LENGTH', 48))
+        # Allow explicit override from caller
+        if ramp_termination_length is not None:
+            self.RAMP_TERMINATION_LENGTH = float(ramp_termination_length)
 
         # Store level counts (interpretation depends on ramp system)
         self.half_levels_above = half_levels_above
@@ -218,6 +244,8 @@ class SplitLevelParkingGarage:
         self._calculate_geometry()
         self._calculate_stalls()
         self._calculate_structure()
+        # Semi-full tributary rectangles and aggregate loads (before footings)
+        self._calculate_tributaries()
         self._calculate_excavation()
         self._calculate_footings()
         self._calculate_backfill()
@@ -237,14 +265,12 @@ class SplitLevelParkingGarage:
         if self.num_bays < 2 or self.num_bays > 7:
             raise ValueError(f"Number of bays must be 2-7 (got {self.num_bays})")
 
-        # Check height constraints (now system-dependent)
-        total_levels = self.half_levels_above + self.half_levels_below
-        total_height = total_levels * self.level_height
-        if total_height > self.max_height_ft:
+        # Check height constraints (above-grade only for zoning/code)
+        height_above = self.half_levels_above * self.level_height
+        if height_above > self.max_height_ft:
             level_type = "half-levels" if self.is_half_level_system else "full floors"
-            print(f"WARNING: Total height {total_height:.1f}' exceeds maximum {self.max_height_ft}' " +
-                  f"({total_levels} {level_type} × {self.level_height:.2f}' = {total_height:.1f}')")
-            print(f"  Recommend reducing to {int(self.max_height_ft / self.level_height)} levels or adjusting max height")
+            print(f"WARNING: Above-grade height {height_above:.1f}' exceeds maximum {self.max_height_ft}' "
+                  f"({self.half_levels_above} {level_type} × {self.level_height:.2f}' = {height_above:.1f}')")
 
         # Warn if length is not on structural grid
         if self.length % self.PRIMARY_BAY_SPACING != 0:
@@ -357,7 +383,8 @@ class SplitLevelParkingGarage:
             entry_elevation=self.entry_elevation,
             ramp_system=self.ramp_system,
             floor_to_floor=self.floor_to_floor,
-            level_height=self.level_height
+            level_height=self.level_height,
+            ramp_termination_length=self.RAMP_TERMINATION_LENGTH
         )
 
         # Calculate all level areas
@@ -368,9 +395,62 @@ class SplitLevelParkingGarage:
         self.sog_levels_sf = level_details['sog_sf']
         self.suspended_levels_sf = level_details['suspended_sf']
         self.num_discrete_levels = level_details['num_levels']
+        self.total_levels = self.num_discrete_levels
 
         # Straight section length (usable for parking along ramp sides)
         self.straight_section_length = self.length - (2 * self.TURN_ZONE_DEPTH)
+
+        # === STRUCTURAL COLUMNS (authoritative generator) ===
+        # Generate columns aligned to stall/aisle boundaries and ramp centerlines
+        # with maximum spans of 31' along length; fixed sizes for now (changeable later).
+        self.columns = generate_columns(self)
+
+    def _calculate_tributaries(self):
+        """
+        Compute semi-full tributary rectangles, clip by cores/entry, and aggregate loads.
+        Stores:
+            - self.column_tributary: list of {x_left,x_right,y_bottom,y_top,area_sf,y_line_type}
+            - self.column_loads: list of {dl_slab_total,ll_slab_total,column_self_weight,service_load,factored_load,eq_floors,ll_psf_effective}
+        """
+        tribs, loads = compute_column_tributaries_and_loads(self)
+        self.column_tributary = tribs
+        self.column_loads = loads
+        # Per-level mapping (split-level first); single-ramp handled later
+        per_col_levels, level_validation = compute_per_level_column_areas_and_loads(self)
+        self.per_level_column_data = per_col_levels
+        self.per_level_area_validation = level_validation
+        # Slab punching per suspended level per column (stud rails only for slabs)
+        slab_t_in = 8.0  # suspended slab thickness (inches)
+        fc_psi = float(getattr(self, 'fc', 4000))
+        stud_required_joints = 0
+        for ci, col_levels in enumerate(self.per_level_column_data):
+            col = self.columns[ci]
+            ytype = col.get('y_line_type', 'interior')
+            col_w_in = float(col.get('width_in', 18.0))
+            col_d_in = float(col.get('depth_in', 24.0))
+            for e in col_levels:
+                if e.get('slab_type') != 'suspended':
+                    continue
+                factored = float(e.get('factored_lb', 0.0))
+                res = compute_slab_punching_for_level(
+                    fc_psi=fc_psi,
+                    slab_thickness_in=slab_t_in,
+                    column_width_in=col_w_in,
+                    column_depth_in=col_d_in,
+                    y_line_type=ytype,
+                    column_x_ft=float(col['x']),
+                    column_y_ft=float(col['y']),
+                    building_length_ft=float(self.length),
+                    building_width_ft=float(self.width),
+                    factored_reaction_lb=factored
+                )
+                e.update({'punch_phi_vc_lb': res['phi_vc_lb'],
+                          'punch_vu_lb': res['vu_lb'],
+                          'punch_utilization': res['utilization'],
+                          'stud_rails_required': res['requires_stud_rails']})
+                if res['requires_stud_rails']:
+                    stud_required_joints += 1
+        self.stud_rail_required_joints = stud_required_joints
 
     def print_discrete_level_breakdown(self):
         """
@@ -418,7 +498,7 @@ class SplitLevelParkingGarage:
 
         # Create a full-building layout for zone calculations
         # Use actual building dimensions (not effective_length from GSF)
-        full_layout = ParkingLayout(self.width, self.length, self.num_bays)
+        full_layout = ParkingLayout(self.width, self.length, self.num_bays, turn_zone_depth=self.TURN_ZONE_DEPTH)
         full_layout.apply_core_blockages()
 
         # Calculate stalls for each discrete half-level
@@ -476,19 +556,18 @@ class SplitLevelParkingGarage:
                 level_stalls += perimeter_stalls
                 breakdown[f'{ramp_side}_row'] = {'stalls': perimeter_stalls}
 
-            # === ZONE 3: Half of center core parking ===
-            # Center rows are in the middle section (between turn zones)
-            # Split these evenly between adjacent half-levels
-            center_stalls_total = 0
-            for section in full_layout.sections:
-                if section.name.startswith('center_row_'):
-                    stalls, wasted = section.calculate_stalls()
-                    center_stalls_total += stalls
-
-            # Each half-level gets half the center core stalls
-            half_center_stalls = int(center_stalls_total / 2)
-            level_stalls += half_center_stalls
-            breakdown['center_core_half'] = {'stalls': half_center_stalls}
+            # === ZONE 3: Adjacent center row only (robust for ≥3 bays) ===
+            if ramp_side == 'west':
+                target_center = 'center_row_1_left'
+            else:
+                target_center = f'center_row_{self.num_bays - 1}_right'
+            center_stalls = next(
+                (section.calculate_stalls()[0] for section in full_layout.sections
+                 if section.name == target_center),
+                0
+            )
+            level_stalls += center_stalls
+            breakdown[target_center] = {'stalls': center_stalls}
 
             # Store results for this level
             stalls_by_level[level_name] = {
@@ -525,7 +604,7 @@ class SplitLevelParkingGarage:
         stalls_by_level = {}
 
         # Create full-building layout (same as split-level)
-        full_layout = ParkingLayout(self.width, self.length, self.num_bays)
+        full_layout = ParkingLayout(self.width, self.length, self.num_bays, turn_zone_depth=self.TURN_ZONE_DEPTH)
         full_layout.apply_core_blockages()
 
         # Determine which bay is the ramp bay
@@ -690,29 +769,26 @@ class SplitLevelParkingGarage:
 
     def _calculate_structure(self):
         """Calculate structural quantities using discrete component takeoffs"""
-        # === COLUMNS ===
-        # 31' × 31' grid spacing throughout building
-        columns_width = int(self.width / self.PRIMARY_BAY_SPACING) + 1
-        columns_length = int(self.length / self.PRIMARY_BAY_SPACING) + 1
-        total_grid_columns = columns_width * columns_length
+        # === COLUMNS (new authoritative model) ===
+        # Columns generated at stall/aisle boundaries and ramp centerlines (≤31' spans)
+        self.num_columns = len(getattr(self, 'columns', []))
+        self.num_center_columns = sum(1 for c in self.columns if c.get('y_line_type') == 'ramp_center')
+        self.num_perimeter_columns = sum(1 for c in self.columns if c.get('y_line_type') != 'ramp_center')
 
-        # Center line columns
-        # SPLIT-LEVEL: NO center columns (perimeter columns only, 12" core walls provide separation)
-        # SINGLE-RAMP: NO center columns (all columns are standard 18"×24")
-        # Both systems use only standard perimeter columns on 31' grid
-        self.num_center_columns = 0
+        # Column concrete volume (sum individual cross-sections × height)
+        total_column_volume_cf = 0.0
+        for c in self.columns:
+            area_sf = (c['width_in'] / 12.0) * (c['depth_in'] / 12.0)
+            total_column_volume_cf += area_sf * self.total_height_ft
+        self.concrete_columns_cy = total_column_volume_cf / 27.0
 
-        # All columns are perimeter columns (18" × 24" on 31' grid)
-        # No center columns in either system
-        self.num_perimeter_columns = total_grid_columns
-        self.num_columns = total_grid_columns
-
-        # Column concrete (18" × 24" cross-section = 3.0 SF, all columns same size)
-        column_volume_cf = (1.5 * 2.0) * self.total_height_ft  # SF × height
-        self.concrete_columns_cy = (column_volume_cf * self.num_columns) / 27
-
-        # No center columns in current architecture
-        self.center_column_concrete_cy = 0
+        # Center column concrete (subset for potential reporting)
+        center_column_volume_cf = 0.0
+        for c in self.columns:
+            if c.get('y_line_type') == 'ramp_center':
+                area_sf = (c['width_in'] / 12.0) * (c['depth_in'] / 12.0)
+                center_column_volume_cf += area_sf * self.total_height_ft
+        self.center_column_concrete_cy = center_column_volume_cf / 27.0
 
         # === SLABS ===
         # Foundation slab on grade (5" thick)
@@ -783,8 +859,8 @@ class SplitLevelParkingGarage:
         - Elevator shaft, stair enclosures, utility/storage closets
 
         System-specific elements:
-        - Split-level: Center columns + beams + curbs
-        - Single-ramp: Ramp barriers only
+        - Split-level: Ramp edge barriers (visual and safety separation at ramp bay centerlines)
+        - Single-ramp: Ramp barriers on ramp-bay long edges (3+ bay)
         """
         # Calculate common core structures first
         self._calculate_core_structures()
@@ -832,9 +908,9 @@ class SplitLevelParkingGarage:
 
         # === STAIR ENCLOSURES ===
         # 12" concrete walls around stair shafts
-        # Footprint: 22' × 12' per stair
-        # Perimeter: 2(22 + 12) = 68 LF per stair (3 sides, one side open for access)
-        stair_perimeter_each = 68  # LF
+        # Footprint: 24' × 12' per stair
+        # Perimeter: 2(24 + 12) = 72 LF per stair (4 sides enclosed)
+        stair_perimeter_each = 72  # LF
 
         # Height from lowest parking level to roof access:
         # = (distance from bottom parking to top parking) + full_floor overhead
@@ -887,125 +963,38 @@ class SplitLevelParkingGarage:
     def _calculate_split_level_center_elements(self):
         """
         Calculate center elements for split-level double-ramp system
-
-        CONFIGURATION-DEPENDENT LOGIC:
-
-        2-BAY DESIGN:
-        - Ascending and descending ramps share center core wall
-        - Center core wall (12" concrete) separates ramp bays
-        - Center curbs (8"×12") protect core wall from vehicle impact
-        - Exterior screen provides perimeter protection
-        - NO ramp edge barriers needed (core wall + screen handle all edges)
-
-        3+ BAY DESIGN:
-        - Ascending and descending ramps SEPARATED by middle parking bay
-        - NO center core wall (ramps don't share a divider)
-        - NO center curbs
-        - Ramp edge barriers (36"×6") on one side of each ramp (where ramp meets middle bay)
-        - Exterior screen on other side of each ramp
+        
+        UPDATED ARCHITECTURE:
+        - No center core walls
+        - No curbs
+        - Use ramp edge barriers as the center divider:
+          two 6" (0.5') thick barriers with a 1.0' clear gap = 2.0' total core width
         """
 
-        if self.num_bays == 2:
-            # === 2-BAY: CENTER CORE WALL + CURBS ===
-            # 12" thick concrete wall separating ramp bays
-            # Purpose: Structural support + traffic separation between ascending/descending ramps
-            # Location: Along center lines, RAMP SECTIONS ONLY (excludes turn zones at ends)
-            # Height: From lowest parking level to top parking surface (does not extend above)
+        # NO center core walls or curbs in updated model
+        self.center_core_wall_sf = 0
+        self.center_core_wall_concrete_cy = 0
+        self.center_curb_concrete_cy = 0
+        self.center_curb_sf = 0
 
-            wall_thickness_ft = 1.0  # 12" thick
-            # Height from bottom parking to top parking = total_levels × level_height
-            wall_height_ft = self.total_levels * self.level_height
-            # Wall length excludes turn zones (48' each end per TURN_ZONE_DEPTH)
-            # Only runs through the ramped middle section, not the flat turn zones
-            wall_length_ft = self.length - (2 * self.TURN_ZONE_DEPTH)  # Ramp sections only
+        # === CENTER RAMP EDGE BARRIERS ===
+        # Barriers run the full height of the parking structure as vertical separation.
+        # Each barrier is 6" (0.5') thick with a 1.0' clear gap between them.
+        barrier_height_ft = self.total_height_ft
+        barrier_thickness_ft = 0.5  # 6" thick barriers
+        barrier_length_per_edge = self.length
+        num_ramp_edges = 2  # two barriers forming the 2.0' center divider
 
-            # Total wall area (both sides for forming cost)
-            wall_area_per_line = 2 * (wall_length_ft * wall_height_ft)  # Both faces
-            self.center_core_wall_sf = wall_area_per_line * self.num_center_lines
+        # Surface area (both faces for forming cost)
+        total_barrier_length = barrier_length_per_edge * num_ramp_edges
+        self.ramp_barrier_sf = total_barrier_length * barrier_height_ft * 2
 
-            # Concrete volume
-            wall_volume_cf_per_line = wall_length_ft * wall_height_ft * wall_thickness_ft
-            self.center_core_wall_concrete_cy = (wall_volume_cf_per_line * self.num_center_lines) / 27
+        # Concrete volume
+        total_volume_cf = total_barrier_length * barrier_height_ft * barrier_thickness_ft
+        self.ramp_barrier_concrete_cy = total_volume_cf / 27
 
-            # === CENTER CURBS (Wheel Stops) ===
-            # 8" tall × 12" wide curbs on each side of center core wall
-            # Purpose: Protect core wall from vehicle tire impact + traffic channeling
-            # Location: Base of core wall, running full ramp length
-
-            # Ramp length (excludes turn zones at each end)
-            ramp_length = self.length - (2 * self.TURN_ZONE_DEPTH)
-
-            curb_height_ft = 8.0 / 12.0  # 8" (standard practice for barrier curbs)
-            curb_width_ft = 1.0   # 12"
-            curb_length_ft = ramp_length  # Full ramp section
-
-            # Two curbs per center line (west and east side)
-            curbs_per_line = 2
-            total_curbs = self.num_center_lines * curbs_per_line
-
-            # Concrete volume for curbs (multiply by total_levels - curbs on every level)
-            curb_volume_cf_each = curb_length_ft * curb_height_ft * curb_width_ft
-            self.center_curb_concrete_cy = (curb_volume_cf_each * total_curbs * self.total_levels) / 27
-
-            # Surface area for curbs (exposed faces only - top and one side, other side against slab)
-            curb_area_sf_each = (curb_length_ft * curb_height_ft) + (curb_length_ft * curb_width_ft)
-            self.center_curb_sf = curb_area_sf_each * total_curbs * self.total_levels
-
-            # === BAY CAP BARRIER (Top Level Only) ===
-            # 36" concrete barrier at ramp termination on top level
-            # Separates flat parking from ramped area elevation difference
-            # Location: North end where RAMP_TERMINATION_LENGTH applies
-            bay_cap_height_ft = 3.0  # 36" (same as ramp barriers)
-            bay_cap_thickness_ft = 0.5  # 6"
-            bay_cap_length_ft = self.width  # Spans building width
-
-            # Surface area (both faces - counted for forming cost)
-            bay_cap_sf = bay_cap_length_ft * bay_cap_height_ft * 2  # Both faces
-
-            # Concrete volume
-            bay_cap_volume_cf = bay_cap_length_ft * bay_cap_height_ft * bay_cap_thickness_ft
-            bay_cap_concrete_cy = bay_cap_volume_cf / 27
-
-            # Rebar (4.0 lbs/SF - standard barrier rate)
-            bay_cap_rebar_lbs = bay_cap_sf * 4.0
-
-            # Store in ramp barrier variables (combined tracking per Option B)
-            self.ramp_barrier_sf = bay_cap_sf
-            self.ramp_barrier_concrete_cy = bay_cap_concrete_cy
-            self.ramp_barrier_rebar_lbs = bay_cap_rebar_lbs
-
-        else:  # 3+ bays
-            # === 3+ BAY: RAMP EDGE BARRIERS (NO CORE WALL) ===
-            # Ramps separated by middle parking bay - no shared core wall
-            # Need barriers where each ramp meets the middle bay
-
-            # NO center core wall or curbs in 3+ bay design
-            self.center_core_wall_sf = 0
-            self.center_core_wall_concrete_cy = 0
-            self.center_curb_concrete_cy = 0
-            self.center_curb_sf = 0
-
-            # === RAMP EDGE BARRIERS ===
-            # 36" (3') tall × 6" thick concrete barriers
-            # Location: One edge of each ramp (where ramp meets middle parking bay)
-            # Length: Building length × 2 ramps (ascending + descending)
-            # Height: Full building height
-
-            barrier_height_ft = 3.0  # 36" (same as IBC requirement)
-            barrier_thickness_ft = 0.5  # 6" thick
-            barrier_length_per_ramp = self.length  # Full building length
-            num_ramp_edges = 2  # One edge each for ascending and descending ramps
-
-            # Surface area (both faces - counted for forming cost)
-            barrier_length_total = barrier_length_per_ramp * num_ramp_edges
-            self.ramp_barrier_sf = barrier_length_total * self.total_height_ft * 2  # Both faces
-
-            # Concrete volume
-            barrier_volume_cf = barrier_length_total * self.total_height_ft * barrier_thickness_ft
-            self.ramp_barrier_concrete_cy = barrier_volume_cf / 27
-
-            # Rebar (4.0 lbs/SF - standard wall rate)
-            self.ramp_barrier_rebar_lbs = self.ramp_barrier_sf * 4.0
+        # Rebar (4.0 lbs/SF - standard wall rate)
+        self.ramp_barrier_rebar_lbs = self.ramp_barrier_sf * 4.0
 
         # Primary variable names (for export and cost calculations)
         self.core_wall_area_sf = self.center_core_wall_sf
@@ -1241,6 +1230,32 @@ class SplitLevelParkingGarage:
         self.total_footing_rebar_lbs = totals['rebar_lbs']
         self.total_footing_excavation_cy = totals['excavation_cy']
 
+        # Prepare footings for visualization (outer + optional drop panel)
+        self.footings_for_visualization = []
+        for foot_list in self.spread_footings_by_type.values():
+            for f in foot_list:
+                entry = {
+                    'x_center': f['x'],
+                    'y_center': f['y'],
+                    'outer_width_ft': f['width_ft'],
+                    'outer_thickness_ft': f.get('depth_ft', f.get('outer_thickness_ft', 1.0)),
+                    'two_depth': f.get('two_depth', False)
+                }
+                if f.get('two_depth', False):
+                    entry.update({
+                        'drop_width_x_ft': f['drop_width_x_ft'],
+                        'drop_width_y_ft': f['drop_width_y_ft'],
+                        'inner_thickness_ft': f['inner_thickness_ft']
+                    })
+                self.footings_for_visualization.append(entry)
+
+        # Provide detailed footing data to cost engine for reporting
+        self.footing_details = {
+            'spread_footings': spread,
+            'continuous_footings': continuous,
+            'retaining_wall_footings': retaining
+        }
+
     def _calculate_backfill(self):
         """
         Calculate backfill quantities for foundation and ramp
@@ -1452,9 +1467,9 @@ class SplitLevelParkingGarage:
             'description': f'8\' × 8\' shaft (32 LF), {parking_height:.1f}\' parking ({self.total_levels} levels) + {self.floor_to_floor:.1f}\' mechanical (pit is CMU)'
         }
 
-        # Stairs (each stair is 34' × 9' = 86 LF exterior, 68 LF interior effective)
+        # Stairs (12' × 24' footprint = 72 LF perimeter, 4-sided)
         # Extends one FULL FLOOR above top parking for roof access
-        stair_lf_per_stair = 68.0  # Effective LF per stair enclosure
+        stair_lf_per_stair = 72.0  # LF per stair enclosure
         total_stair_lf = stair_lf_per_stair * self.num_stairs
         stair_height = parking_height + self.floor_to_floor
         breakdown['stair_enclosures'] = {
@@ -1462,7 +1477,7 @@ class SplitLevelParkingGarage:
             'num_stairs': self.num_stairs,
             'total_lf': total_stair_lf,
             'height_ft': stair_height,
-            'description': f'{self.num_stairs} stair enclosures @ 68 LF each, {parking_height:.1f}\' parking ({self.total_levels} levels) + {self.floor_to_floor:.1f}\' roof access'
+            'description': f'{self.num_stairs} stair enclosures @ 72 LF each, {parking_height:.1f}\' parking ({self.total_levels} levels) + {self.floor_to_floor:.1f}\' roof access'
         }
 
         # Utility closet (20' × 19' = 78 LF perimeter)
@@ -1487,34 +1502,12 @@ class SplitLevelParkingGarage:
 
         # System-specific center elements
         from .geometry.design_modes import RampSystemType
-        if self.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE and self.num_bays == 2:
-            # Center core walls (12" concrete, ramp sections only, excludes turn zones)
-            # Only runs through ramped middle section, not flat turn zones at ends
-            core_wall_lf = self.length - (2 * self.TURN_ZONE_DEPTH)
-            core_wall_height = parking_height  # Same as all cores: total_levels × level_height
-            breakdown['center_core_walls'] = {
-                'lf': core_wall_lf,
-                'height_ft': core_wall_height,
-                'thickness_in': 12,
-                'description': f'12" concrete wall, {core_wall_lf:.0f} LF (excludes {2*self.TURN_ZONE_DEPTH:.0f}\' turn zones), {parking_height:.1f}\' ({self.total_levels} levels)'
-            }
-
-            # Center curbs (8" × 12", both sides, ramp sections only)
-            ramp_length = self.length - (2 * self.TURN_ZONE_DEPTH)
-            curbs_per_level = ramp_length * 2  # Both sides
-            total_curb_lf = curbs_per_level * self.total_levels
-            breakdown['center_curbs'] = {
-                'lf_per_level': curbs_per_level,
-                'num_levels': self.total_levels,
-                'total_lf': total_curb_lf,
-                'description': f'8" × 12" curbs, {ramp_length:.0f}\' ramp L × 2 sides × {self.total_levels} levels'
-            }
-        elif hasattr(self, 'ramp_barrier_sf') and self.ramp_barrier_sf > 0:
+        if hasattr(self, 'ramp_barrier_sf') and self.ramp_barrier_sf > 0:
             # Ramp barriers (36" × 6" or 12" thick depending on system)
-            # For split-level 3+ bay or single-ramp
+            # Split-level center divide uses two 6" barriers with 1.0' gap
             barrier_lf_per_level = self.length * 2  # Both sides of ramp bay(s)
             total_barrier_lf = barrier_lf_per_level * self.total_levels
-            barrier_thickness = 12 if self.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE else 6
+            barrier_thickness = 6  # 6" for split-level center divide
             breakdown['ramp_barriers'] = {
                 'lf_per_level': barrier_lf_per_level,
                 'num_levels': self.total_levels,
@@ -1526,14 +1519,72 @@ class SplitLevelParkingGarage:
 
         # Calculate totals
         total_lf = elevator_shaft_lf + total_stair_lf + utility_lf + storage_lf
-        if 'center_core_walls' in breakdown:
-            total_lf += breakdown['center_core_walls']['lf']
-        if 'center_curbs' in breakdown:
-            total_lf += breakdown['center_curbs']['total_lf']
         if 'ramp_barriers' in breakdown:
             total_lf += breakdown['ramp_barriers']['total_lf']
 
         breakdown['total_wall_lf'] = total_lf
+
+        # === 12" WALL SUBCATEGORIES (SF and LF) ===
+        # Provide clear subcategories to avoid confusion with TR budget groupings
+        twelve_inch = {}
+
+        # Elevator shaft
+        twelve_inch['elevator_shaft'] = {
+            'lf': elevator_shaft_lf,
+            'sf': getattr(self, 'elevator_shaft_sf', 0.0)
+        }
+
+        # Stairs
+        twelve_inch['stair_enclosures'] = {
+            'lf': total_stair_lf,
+            'sf': getattr(self, 'stair_enclosure_sf', 0.0)
+        }
+
+        # Utility and storage
+        twelve_inch['utility_closet'] = {
+            'lf': utility_lf,
+            'sf': getattr(self, 'utility_closet_sf', 0.0)
+        }
+        twelve_inch['storage_closet'] = {
+            'lf': storage_lf,
+            'sf': getattr(self, 'storage_closet_sf', 0.0)
+        }
+
+        # Center core walls (none in updated architecture)
+        twelve_inch['center_core_walls'] = {
+            'lf': 0.0,
+            'sf': 0.0
+        }
+
+        # Ramp edge barriers (6" thick per updated spec for split-level)
+        ramp_barrier_lf = 0.0
+        if 'ramp_barriers' in breakdown:
+            ramp_barrier_lf = breakdown['ramp_barriers'].get('total_lf', 0.0)
+        twelve_inch['ramp_edge_barriers'] = {
+            'lf': ramp_barrier_lf,
+            'sf': getattr(self, 'ramp_barrier_sf', 0.0)
+        }
+
+        # Top-level perimeter barrier (standalone only)
+        top_barrier_sf = getattr(self, 'top_level_barrier_12in_sf', 0.0)
+        if top_barrier_sf > 0:
+            full_perimeter_lf = 2 * (self.length + self.width)
+        else:
+            full_perimeter_lf = 0.0
+        twelve_inch['top_level_perimeter_barrier'] = {
+            'lf': full_perimeter_lf,
+            'sf': top_barrier_sf
+        }
+
+        # Totals across subcategories
+        total_sf_12in = sum(item['sf'] for item in twelve_inch.values())
+        total_lf_12in = sum(item['lf'] for item in twelve_inch.values())
+        twelve_inch['totals'] = {
+            'lf': total_lf_12in,
+            'sf': total_sf_12in
+        }
+
+        breakdown['twelve_inch_wall_subtotals'] = twelve_inch
 
         return breakdown
 
@@ -1558,7 +1609,7 @@ class SplitLevelParkingGarage:
             'column_cross_section_sf': 3.0,
             'average_height_ft': self.total_height_ft,
             'total_linear_feet': self.num_columns * self.total_height_ft,
-            'description': f'{self.num_columns} columns @ {self.PRIMARY_BAY_SPACING}\' spacing on {columns_width} × {columns_length} grid'
+            'description': f'{self.num_columns} columns from authoritative generator (stall/aisle boundaries and ramp centerlines, ≤ {self.PRIMARY_BAY_SPACING}\')'
         }
 
     def get_level_breakdown(self) -> list:
@@ -1617,7 +1668,8 @@ class SplitLevelParkingGarage:
             'floors': [],
             'columns': [],
             'core_wall': [],
-            'ramps': []
+            'ramps': [],
+            'footings': []
         }
 
         # Floor plates at each parking level elevation
@@ -1659,65 +1711,47 @@ class SplitLevelParkingGarage:
         # Columns extend from bottom to top parking level
         top_parking_level_height = self.total_height_ft
 
-        for i in range(columns_width := int(self.width / self.PRIMARY_BAY_SPACING) + 1):
-            for j in range(columns_length := int(self.length / self.PRIMARY_BAY_SPACING) + 1):
-                x = j * self.PRIMARY_BAY_SPACING
-                y = i * self.PRIMARY_BAY_SPACING
-                z_bottom = -self.depth_below_grade_ft
-                z_top = top_parking_level_height - self.depth_below_grade_ft
+        # Use authoritative columns list
+        z_bottom = -self.depth_below_grade_ft
+        z_top = top_parking_level_height - self.depth_below_grade_ft
+        for c in getattr(self, 'columns', []):
+            geometry['columns'].append({
+                'x': c['x'],
+                'y': c['y'],
+                'z_bottom': z_bottom,
+                'z_top': z_top
+            })
 
-                geometry['columns'].append({
-                    'x': x,
-                    'y': y,
-                    'z_bottom': z_bottom,
-                    'z_top': z_top
-                })
+        # Center elements: columns + ramp edge barriers (no core walls/curbs)
+        geometry['center_core_walls'] = []  # legacy key (not used)
+        geometry['center_curbs'] = []       # legacy key (not used)
+        geometry['center_columns'] = []     # legacy key (not used)
+        geometry['ramp_edge_barriers'] = []
 
-        # Center core walls (split-level only) - 12" solid concrete walls separating ramp bays
-        # For 2 bays: 1 center line with 12" wall full length
-        # For 3 bays: 2 center lines with walls
-        # NOTE: Center spacing is 3' total: 1' west curb + 1' wall + 1' east curb
-        # Walls run full building length (including turn zones)
-        # Curbs only in ramp sections (not through turn zones)
+        # Calculate ramp section extent (for center columns run)
+        ramp_x_start = self.TURN_ZONE_DEPTH
+        ramp_x_end = self.length - self.TURN_ZONE_DEPTH
 
-        geometry['center_core_walls'] = []
-        geometry['center_curbs'] = []
-
-        # Calculate ramp section extent (for curbs)
-        ramp_x_start = self.TURN_ZONE_DEPTH  # 48' from south
-        ramp_x_end = self.length - self.TURN_ZONE_DEPTH  # 48' from north
-
-        # Only generate center elements for split-level system
-        if self.is_half_level_system:
-            for i in range(self.num_center_lines):
-                # Y position of center line
-                center_y = (i + 1) * self.PARKING_MODULE_WIDTH + (i + 0.5) * self.CENTER_SPACING + self.EXTERIOR_WALL_THICKNESS
-
-                # Core wall (12" thick = 1.0', runs full building length including turn zones)
-                geometry['center_core_walls'].append({
-                    'x_start': 0,
-                    'x_end': self.length,
-                    'y_center': center_y,
-                    'thickness': 1.0,  # 12" = 1.0'
-                    'z_bottom': -self.depth_below_grade_ft,
-                    'z_top': top_parking_level_height - self.depth_below_grade_ft
-                })
-
-                # Curbs (8" × 12" = 0.67' × 1.0')
-                # Run only through ramp section (not turn zones) on west and east sides of core wall
-                # Generate curbs for EACH LEVEL (not just one level)
-                for level_idx in range(self.total_levels):
-                    z_level = -self.depth_below_grade_ft + (level_idx * self.level_height)
-                    geometry['center_curbs'].append({
-                        'x_start': ramp_x_start,
-                        'x_end': ramp_x_end,
-                        'y_west': center_y - 1.5,  # West curb (1' wide, centered 1.5' from center)
-                        'y_east': center_y + 0.5,  # East curb (1' wide, centered 0.5' from center)
-                        'curb_width': 1.0,  # 12" wide
-                        'curb_height': 8.0 / 12.0,  # 8" tall
-                        'z_bottom': z_level,
-                        'level': level_idx
-                    })
+        # Generate ramp edge barriers (visual separator for ramp bay centerlines)
+        for i in range(self.num_center_lines):
+            center_y = (i + 1) * self.PARKING_MODULE_WIDTH + (i + 0.5) * self.CENTER_SPACING + self.EXTERIOR_WALL_THICKNESS
+            # Two ramp edge barriers forming 2.0' center divider (6" each) with 1.0' clear gap, full length
+            geometry['ramp_edge_barriers'].append({
+                'x_start': 0,
+                'x_end': self.length,
+                'y_start': center_y - 1.0,
+                'y_end': center_y - 0.5,  # 6" band below the 1.0' clear gap
+                'z_bottom': -self.depth_below_grade_ft,
+                'z_top': top_parking_level_height - self.depth_below_grade_ft
+            })
+            geometry['ramp_edge_barriers'].append({
+                'x_start': 0,
+                'x_end': self.length,
+                'y_start': center_y + 0.5,
+                'y_end': center_y + 1.0,  # 6" band above the 1.0' clear gap
+                'z_bottom': -self.depth_below_grade_ft,
+                'z_top': top_parking_level_height - self.depth_below_grade_ft
+            })
 
         # Ramp paths (simplified helical paths for up/down)
         ramp_points_up = []
@@ -1742,178 +1776,36 @@ class SplitLevelParkingGarage:
             'down': ramp_points_down
         }
 
+        # Footings (if calculated)
+        if hasattr(self, 'footings_for_visualization'):
+            z_top_footing = -self.depth_below_grade_ft  # Top at bottom of grade
+            for f in self.footings_for_visualization:
+                outer_half = f['outer_width_ft'] / 2.0
+                x0 = max(0.0, f['x_center'] - outer_half)
+                x1 = min(self.length, f['x_center'] + outer_half)
+                y0 = max(0.0, f['y_center'] - outer_half)
+                y1 = min(self.width, f['y_center'] + outer_half)
+                geometry['footings'].append({
+                    'type': 'outer',
+                    'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
+                    'z_top': z_top_footing,
+                    'thickness_ft': f['outer_thickness_ft']
+                })
+                if f.get('two_depth', False):
+                    dp_x_half = f['drop_width_x_ft'] / 2.0
+                    dp_y_half = f['drop_width_y_ft'] / 2.0
+                    dx0 = max(0.0, f['x_center'] - dp_x_half)
+                    dx1 = min(self.length, f['x_center'] + dp_x_half)
+                    dy0 = max(0.0, f['y_center'] - dp_y_half)
+                    dy1 = min(self.width, f['y_center'] + dp_y_half)
+                    geometry['footings'].append({
+                        'type': 'drop',
+                        'x0': dx0, 'x1': dx1, 'y0': dy0, 'y1': dy1,
+                        'z_top': z_top_footing,
+                        'thickness_ft': f['inner_thickness_ft']
+                    })
+
         return geometry
-
-    def calculate_quantities(self) -> 'QuantityTakeoff':
-        """
-        Extract all quantities as a QuantityTakeoff object
-
-        This is the NEW ARCHITECTURE method that separates geometry from costing.
-        Returns a structured, validated quantity takeoff that costing logic operates on.
-
-        Returns:
-            QuantityTakeoff object with all geometric/structural quantities
-        """
-        from .quantities import (
-            QuantityTakeoff, LevelQuantities, FoundationQuantities,
-            ExcavationQuantities, StructuralQuantities, CenterElementQuantities,
-            VerticalCirculationQuantities, ExteriorQuantities, MEPQuantities,
-            SiteFinishesQuantities, SlabType
-        )
-        from .geometry.design_modes import RampSystemType
-
-        # Build level-by-level quantities
-        level_quantities = []
-        for i, (level_name, gsf, slab_type_str, elevation) in enumerate(self.levels):
-            slab_type = SlabType.SOG if slab_type_str == 'sog' else SlabType.SUSPENDED_PT
-
-            level_quantities.append(LevelQuantities(
-                level_name=level_name,
-                level_index=i,
-                elevation_ft=elevation,
-                gross_floor_area_sf=gsf,
-                slab_type=slab_type,
-                stall_count=self.stalls_by_level.get(level_name, {}).get('stalls', 0),
-                is_below_grade=(i < self.half_levels_below),
-                is_entry_level=(i == self.entry_level_index),
-                is_top_level=(i == self.total_levels - 1)
-            ))
-
-        # Foundation quantities
-        foundation = FoundationQuantities(
-            sog_area_sf=self.sog_levels_sf,
-            sog_thickness_in=5.0,
-            vapor_barrier_sf=self.sog_levels_sf,
-            gravel_4in_sf=self.sog_levels_sf,
-            spread_footing_count=self.spread_footing_count,
-            spread_footing_concrete_cy=self.spread_footing_concrete_cy,
-            spread_footing_rebar_lbs=self.spread_footing_rebar_lbs,
-            spread_footing_excavation_cy=self.spread_footing_excavation_cy,
-            spread_footings_by_type=self.spread_footing_count_by_type,
-            continuous_footing_length_ft=self.continuous_footing_length_ft,
-            continuous_footing_concrete_cy=self.continuous_footing_concrete_cy,
-            continuous_footing_rebar_lbs=self.continuous_footing_rebar_lbs,
-            continuous_footing_excavation_cy=self.continuous_footing_excavation_cy,
-            continuous_footings_by_location=self.continuous_footings,
-            has_retaining_walls=self.has_retaining_wall_footings,
-            retaining_wall_sf=self.retaining_wall_sf if self.half_levels_below > 0 else 0.0,
-            retaining_wall_footing_concrete_cy=self.retaining_wall_footing_concrete_cy,
-            retaining_wall_footing_rebar_lbs=self.retaining_wall_footing_rebar_lbs
-        )
-
-        # Excavation quantities
-        excavation = ExcavationQuantities(
-            has_below_grade=(self.half_levels_below > 0),
-            depth_below_grade_ft=self.depth_below_grade_ft,
-            mass_excavation_cy=self.excavation_cy,
-            over_excavation_cy=getattr(self, 'over_excavation_cy', 0.0),
-            export_cy=self.export_cy,
-            structural_fill_cy=self.structural_fill_cy
-        )
-
-        # Structural quantities
-        structure = StructuralQuantities(
-            suspended_slab_area_sf=self.suspended_slab_sf,
-            suspended_slab_thickness_in=8.0,
-            suspended_slab_concrete_cy=self.concrete_slab_cy,
-            column_count=self.num_columns,
-            column_size_in=(18, 24),
-            column_grid_spacing_ft=self.PRIMARY_BAY_SPACING,
-            column_total_height_ft=self.total_height_ft,
-            column_concrete_cy=self.concrete_columns_cy,
-            elevator_shaft_sf=self.elevator_shaft_sf,
-            elevator_shaft_concrete_cy=self.elevator_shaft_concrete_cy,
-            stair_enclosure_count=self.num_stairs,
-            stair_enclosure_sf=self.stair_enclosure_sf,
-            stair_enclosure_concrete_cy=self.stair_enclosure_concrete_cy,
-            utility_closet_sf=self.utility_closet_sf,
-            utility_closet_concrete_cy=self.utility_closet_concrete_cy,
-            storage_closet_sf=self.storage_closet_sf,
-            storage_closet_concrete_cy=self.storage_closet_concrete_cy,
-            elevator_pit_cmu_sf=self.elevator_pit_cmu_sf,
-            elevator_pit_cmu_cy=self.elevator_pit_cmu_cy,
-            rebar_slabs_lbs=self.suspended_slab_sf * 3.0,  # 3.0 lbs/SF for PT slabs
-            rebar_columns_lbs=self.concrete_columns_cy * 1320.0,  # 1320 lbs/CY for columns
-            rebar_walls_lbs=(self.elevator_shaft_sf + self.stair_enclosure_sf +
-                           self.utility_closet_sf + self.storage_closet_sf) * 4.0,  # 4.0 lbs/SF walls
-            rebar_footings_lbs=self.total_footing_rebar_lbs,
-            total_rebar_lbs=self.total_rebar_lbs,
-            post_tension_lbs=self.post_tension_lbs,
-            concrete_pumping_cy=self.total_concrete_cy
-        )
-
-        # Center elements (system-dependent)
-        center_elements = CenterElementQuantities(
-            has_core_walls=(self.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE and self.num_bays == 2),
-            core_wall_sf=getattr(self, 'center_core_wall_sf', 0.0),
-            core_wall_concrete_cy=getattr(self, 'center_core_wall_concrete_cy', 0.0),
-            core_wall_length_ft=self.length if hasattr(self, 'center_core_wall_sf') and self.center_core_wall_sf > 0 else 0.0,
-            has_center_curbs=(self.ramp_system == RampSystemType.SPLIT_LEVEL_DOUBLE and self.num_bays == 2),
-            center_curb_concrete_cy=getattr(self, 'center_curb_concrete_cy', 0.0),
-            center_curb_sf=getattr(self, 'center_curb_sf', 0.0),
-            center_curb_total_lf=getattr(self, 'center_curb_sf', 0.0) / 0.67 if hasattr(self, 'center_curb_sf') else 0.0,
-            has_ramp_barriers=hasattr(self, 'ramp_barrier_sf') and self.ramp_barrier_sf > 0,
-            ramp_barrier_sf=getattr(self, 'ramp_barrier_sf', 0.0),
-            ramp_barrier_concrete_cy=getattr(self, 'ramp_barrier_concrete_cy', 0.0),
-            ramp_barrier_rebar_lbs=getattr(self, 'ramp_barrier_rebar_lbs', 0.0),
-            ramp_barrier_total_lf=getattr(self, 'ramp_barrier_sf', 0.0) / 3.0 if hasattr(self, 'ramp_barrier_sf') else 0.0,
-            has_top_barrier=(self.building_type == 'standalone' and self.half_levels_above > 0),
-            top_barrier_sf=getattr(self, 'top_level_barrier_12in_sf', 0.0),
-            top_barrier_concrete_cy=getattr(self, 'top_level_barrier_concrete_cy', 0.0)
-        )
-
-        # Vertical circulation
-        vertical_circulation = VerticalCirculationQuantities(
-            elevator_stop_count=self.num_elevator_stops,
-            stair_count=self.num_stairs,
-            stair_flight_count=self.num_stair_flights
-        )
-
-        # Exterior
-        exterior = ExteriorQuantities(
-            parking_screen_sf=self.exterior_wall_sf,
-            perimeter_lf=self.perimeter_lf,
-            screen_height_ft=15.0  # From budget calculation
-        )
-
-        # MEP (all based on total_gsf)
-        mep = MEPQuantities(
-            total_gsf=self.total_gsf,
-            electrical_sf=self.total_gsf,
-            hvac_sf=self.total_gsf,
-            plumbing_sf=self.total_gsf,
-            fire_protection_sf=self.total_gsf
-        )
-
-        # Site finishes
-        site_finishes = SiteFinishesQuantities(
-            sealed_concrete_sf=self.total_gsf,
-            pavement_marking_stall_count=self.total_stalls,
-            final_cleaning_sf=self.total_gsf
-        )
-
-        # Assemble complete quantity takeoff
-        return QuantityTakeoff(
-            building_length_ft=self.length,
-            building_width_ft=self.width,
-            footprint_sf=self.footprint_sf,
-            num_bays=self.num_bays,
-            total_height_ft=self.total_height_ft,
-            ramp_system_name=self.ramp_system.name if hasattr(self.ramp_system, 'name') else str(self.ramp_system),
-            building_type=self.building_type,
-            total_stalls=self.total_stalls,
-            total_gsf=self.total_gsf,
-            sf_per_stall=self.sf_per_stall,
-            levels=level_quantities,
-            foundation=foundation,
-            excavation=excavation,
-            structure=structure,
-            center_elements=center_elements,
-            vertical_circulation=vertical_circulation,
-            exterior=exterior,
-            mep=mep,
-            site_finishes=site_finishes
-        )
 
 
 def compute_width_ft(num_bays: int) -> float:
@@ -1929,12 +1821,32 @@ def compute_width_ft(num_bays: int) -> float:
     """
     return 1.0 + (num_bays * SplitLevelParkingGarage.PARKING_MODULE_WIDTH) + ((num_bays - 1) * SplitLevelParkingGarage.CENTER_SPACING)
 
+# Neutral alias for clarity at call sites
+ParkingGarage = SplitLevelParkingGarage
 
-def load_cost_database() -> Dict:
-    """Load cost database from JSON file"""
-    data_dir = Path(__file__).parent.parent / 'data'
-    with open(data_dir / 'cost_database.json', 'r') as f:
-        return json.load(f)
+def create_parking_garage(
+    length: float,
+    half_levels_above: int,
+    half_levels_below: int,
+    num_bays: int,
+    *,
+    ramp_system: Optional[object] = None,
+    **kwargs
+) -> ParkingGarage:
+    """
+    Factory to create a ParkingGarage with centralized ramp system selection.
+    If ramp_system is None, selects based on geometry; otherwise honors override.
+    """
+    from .geometry.design_modes import RampSystemType
+    selected_system = ramp_system or RampSystemType.determine_optimal(length, num_bays)
+    return SplitLevelParkingGarage(
+        length=length,
+        half_levels_above=half_levels_above,
+        half_levels_below=half_levels_below,
+        num_bays=num_bays,
+        ramp_system=selected_system,
+        **kwargs
+    )
 
 
 if __name__ == "__main__":
